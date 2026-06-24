@@ -35,7 +35,7 @@
 # Inputs (substituted by repro.sh and prepended to this script before piping
 # into `gcloud compute ssh`):
 #   API_URL                 - https://app.daytona.io (NOT /api — install.sh appends /api)
-#   API_KEY                 - customer's personal dtn_xxx (used by install.sh's
+#   API_KEY                 - your personal dtn_xxx (used by install.sh's
 #                             config call and stubbed registration; not embedded
 #                             in the unit file)
 #   RUNNER_API_URL          - public URL where this runner is reachable

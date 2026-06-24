@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/_lib/sku-azure.sh — quota-aware Azure VM SKU selection.
-# Sourced by scripts/azure-setup/up.sh and scripts/azure-oss-setup/up.sh.
+# Sourced by scripts/azure-setup/up.sh.
 #
 # Requires: az, jq, awk; STATE_DIR var; sku-data.sh and common.sh sourced first.
 
@@ -14,8 +14,7 @@
 #   5. has family quota headroom >= REQUIRED_VCPU_TOTAL
 #
 # REQUIRED_VCPU_TOTAL is the SUM across pools sharing this SKU:
-#   azure-setup     = vCPU * 3   (2 system + 1 sandbox)
-#   azure-oss-setup = vCPU * 4   (3 system + 1 sandbox)
+#   azure-setup = vCPU * 3   (2 system + 1 sandbox)
 #
 # Outputs the chosen VM size name to STDOUT. Menu + logs go to STDERR.
 omc::azure_select_vm_size() {
@@ -148,7 +147,11 @@ omc::azure_select_vm_size() {
 }
 
 _omc_azure_ranks_json() {
-  local first=1 fam
+  # up.sh sets IFS=$'\n\t' (no space). OMC_AZURE_FAMILY_PREFIXES is space-
+  # separated, so force a normal IFS locally or the for-loop won't split it
+  # (collapsing every family into one bogus key that ranks 0 — which drops every
+  # VM SKU). Mirrors the fix in sku-aws.sh:_omc_aws_ranks_json.
+  local first=1 fam IFS=$' \t\n'
   printf '{'
   for fam in $OMC_AZURE_FAMILY_PREFIXES; do
     [[ $first -eq 0 ]] && printf ','

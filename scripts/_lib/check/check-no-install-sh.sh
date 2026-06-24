@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hack/check-no-install-sh.sh
 #
-# Scenario S1 guard: ensures the K8s-native BYOC flow has no residual references to
+# Guard: ensures the K8s-native BYOC flow has no residual references to
 # install.sh-on-node, runner-node SSH, or single-instance install in any
 # supported-flow doc, NOTES.txt, or values.yaml comment.
 #
@@ -29,12 +29,15 @@ FAIL=0
 # We grep each surface independently because the allowlist differs.
 SUPPORTED_DOC_PATHS=(
   "README.md"
-  "charts/daytona/README.md"
-  "charts/daytona/AWS-SETUP.md"
-  "charts/daytona/templates/NOTES.txt"
   "charts/daytona-region/README.md"
   "charts/daytona-region/QUICKSTART.md"
   "charts/daytona-region/templates/NOTES.txt"
+  "scripts/aws-setup/README.md"
+  "scripts/aws-setup/test/README.md"
+  "scripts/azure-setup/README.md"
+  "scripts/azure-setup/test/README.md"
+  "scripts/gcs-setup/README.md"
+  "scripts/gcs-setup/test/README.md"
 )
 
 # Patterns that signal a non-K8s-native install path.
@@ -75,7 +78,7 @@ if [[ -f "$LEGACY" ]]; then
 fi
 
 # values.yaml comments must NOT instruct operators to ssh into the node.
-for chart in charts/daytona charts/daytona-region; do
+for chart in charts/daytona-region; do
   if [[ -f "$chart/values.yaml" ]]; then
     for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
       if grep -niE "$pattern" "$chart/values.yaml" >/dev/null 2>&1; then

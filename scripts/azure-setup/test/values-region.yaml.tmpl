@@ -1,4 +1,4 @@
-# daytona-region (BYOC) helm values - Azure (AKS) reproducer.
+# daytona-region (BYOC) helm values - Azure (AKS).
 # Substituted via envsubst at runtime. The repro.sh script renders this
 # template with: DOMAIN, REGION_NAME, DAYTONA_API_URL, DAYTONA_API_KEY,
 # RCLONE_ACCESS_KEY, RCLONE_SECRET_KEY, BLOB_BUCKET.
@@ -12,12 +12,12 @@ regionName: "${REGION_NAME}"
 # route through it.
 proxyUrl: "https://proxy.${DOMAIN}"
 
-# Public URL of the snapshot manager. Storing snapshots in customer-managed
+# Public URL of the snapshot manager. Storing snapshots in operator-managed
 # Azure Blob storage (via the rclone S3 gateway sidecar we deploy alongside).
 snapshotManagerUrl: "https://snapshots.${DOMAIN}"
 
 # Daytona Cloud API. For self-hosted Daytona this would be your own URL,
-# but BYOC customers point at the public Cloud control plane.
+# but BYOC deployments point at the public Cloud control plane.
 daytonaApiUrl: "${DAYTONA_API_URL}"
 daytonaApiKey: "${DAYTONA_API_KEY}"
 

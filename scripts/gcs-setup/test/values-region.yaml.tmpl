@@ -1,4 +1,4 @@
-# daytona-region (BYOC) helm values — GCP (GKE) reproducer.
+# daytona-region (BYOC) helm values — GCP (GKE).
 # Substituted via envsubst at runtime. The repro.sh script renders this
 # template with: DOMAIN, REGION_NAME, DAYTONA_API_URL, DAYTONA_API_KEY,
 # GCS_BUCKET, GCS_LOCATION, HMAC_ACCESS_KEY, HMAC_SECRET_KEY.
@@ -18,11 +18,11 @@ regionName: "${REGION_NAME}"
 proxyUrl: "https://proxy.${DOMAIN}"
 
 # Public URL of the snapshot manager. Stores both snapshot blobs and
-# declarative-builder build context in the customer-owned GCS bucket below.
+# declarative-builder build context in your GCS bucket below.
 snapshotManagerUrl: "https://snapshots.${DOMAIN}"
 
 # Daytona Cloud API. For self-hosted Daytona this would be your own URL,
-# but BYOC customers point at the public Cloud control plane.
+# but BYOC deployments point at the public Cloud control plane.
 daytonaApiUrl: "${DAYTONA_API_URL}"
 daytonaApiKey: "${DAYTONA_API_KEY}"
 
@@ -83,9 +83,8 @@ services:
         nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     storage:
       s3:
-        # GCS interop XML API — uses the SAME customer-owned bucket every
-        # runner VM reads/writes for the declarative builder (matching
-        # AWS_* env vars in /etc/systemd/system/daytona-runner.service).
+        # GCS interop XML API — uses the SAME bucket the runner
+        # reads/writes for the declarative builder (matching runner AWS_* env vars).
         #
         # The snapshot-manager's S3 client just sees an S3-compatible
         # endpoint at storage.googleapis.com; bucket name resolution,

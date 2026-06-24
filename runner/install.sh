@@ -382,8 +382,8 @@ RUNNER_API_KEY=${RUNNER_API_KEY:-$(openssl rand -hex 32)}
 # 7b. Declarative builder S3 / object storage configuration
 #
 # The runner pulls declarative-builder context tarballs from an S3-compatible
-# bucket. In a BYOC / Customer Managed Compute setup, this is the same
-# customer-owned bucket the region's snapshot-manager service is configured
+# bucket. In a BYOC setup, this is the same
+# operator-owned bucket the region's snapshot-manager service is configured
 # against (services.snapshotManager.storage.s3.* in the daytona-region chart).
 #
 # Leaving these blank lets the runner come up, but any snapshot created from

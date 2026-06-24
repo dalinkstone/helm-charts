@@ -1,5 +1,5 @@
 # Minimal values fixture for daytona-region rendering smoke test
-# Used to capture pre/post baseline render diffs (Scenario S6)
+# Used to capture pre/post baseline render diffs
 regionName: "test-region"
 proxyUrl: "https://proxy.daytona.example.com"
 snapshotManagerUrl: "https://snapshots.daytona.example.com"

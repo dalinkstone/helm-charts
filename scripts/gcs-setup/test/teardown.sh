@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC reproducer (GCP) — teardown
+# Daytona BYOC (GCP) — teardown
 # =============================================================================
-# Nukes every CMC-related resource in $GCP_PROJECT, regardless of whether
+# Nukes every BYOC-related resource in $GCP_PROJECT, regardless of whether
 # the local .state/ directory still knows about it. Discovery is by:
 #
 #   - Names matching our deterministic patterns:
-#       GKE clusters       daytona-cmc-gke-*
+#       GKE clusters       daytona-byoc-gke-*
 #       GCE instances      gke-runner-*  (and any with labels.managed-by=gcs-repro)
-#       GCS buckets        gke-cmc-*-snapshots
+#       GCS buckets        gke-byoc-*-snapshots
 #       Service accounts   dt-snap-*, dt-runner-*
 #       Secret Manager     daytona-*   (and any with labels.managed-by=gcs-repro)
 #       Firewall rules     *-runner-ingress, *-iap-ssh
-#       Daytona regions    gke-cmc-*
-#       Daytona runners    gke-runner-*  (and any attached to a CMC region)
+#       Daytona regions    gke-byoc-*
+#       Daytona runners    gke-runner-*  (and any attached to a BYOC region)
 #
 #   - Labels: anything with labels.managed-by=gcs-repro (always swept)
 #
@@ -176,8 +176,8 @@ delete_daytona_runner() {
 # We always do this FIRST so the region delete on Daytona's side doesn't
 # get stuck on "runners still attached". Two phases:
 #   (a) list runners, delete any whose name starts with gke-runner-
-#       OR whose regionId points at a CMC-managed region
-#   (b) list regions, delete any whose name starts with gke-cmc-
+#       OR whose regionId points at a BYOC-managed region
+#   (b) list regions, delete any whose name starts with gke-byoc-
 
 daytona_cloud_cleanup() {
   if [[ -z "$DAYTONA_API_KEY" ]]; then
@@ -186,29 +186,29 @@ daytona_cloud_cleanup() {
     return 0
   fi
 
-  log "Daytona Cloud: discovering CMC regions + runners"
-  local regions_json runners_json cmc_region_ids cmc_runner_ids
+  log "Daytona Cloud: discovering BYOC regions + runners"
+  local regions_json runners_json byoc_region_ids byoc_runner_ids
   regions_json="$(curl -sS --max-time 30 -H "Authorization: Bearer $DAYTONA_API_KEY" \
     "$DAYTONA_API_URL/regions" 2>/dev/null || echo '[]')"
   runners_json="$(curl -sS --max-time 30 -H "Authorization: Bearer $DAYTONA_API_KEY" \
     "$DAYTONA_API_URL/runners" 2>/dev/null || echo '[]')"
 
-  cmc_region_ids="$(echo "$regions_json" | jq -r '.[]? | select((.name // "") | startswith("gke-cmc-")) | .id')"
-  cmc_runner_ids="$(echo "$runners_json" | jq -r --argjson regions "$regions_json" '
+  byoc_region_ids="$(echo "$regions_json" | jq -r '.[]? | select((.name // "") | startswith("gke-byoc-")) | .id')"
+  byoc_runner_ids="$(echo "$runners_json" | jq -r --argjson regions "$regions_json" '
     .[]? |
     . as $r |
     select(
       (($r.name // "") | startswith("gke-runner-")) or
       (
         ($r.regionId // ($r.region // {}).id) as $rid |
-        ($regions | map(select((.name // "") | startswith("gke-cmc-")) | .id) | index($rid))
+        ($regions | map(select((.name // "") | startswith("gke-byoc-")) | .id) | index($rid))
       )
     ) | .id
   ')"
 
   # Delete runners first
-  if [[ -n "$cmc_runner_ids" ]]; then
-    log "  deleting CMC runners from Daytona Cloud:"
+  if [[ -n "$byoc_runner_ids" ]]; then
+    log "  deleting BYOC runners from Daytona Cloud:"
     local count=0
     while IFS= read -r rid; do
       [[ -z "$rid" ]] && continue
@@ -216,18 +216,18 @@ daytona_cloud_cleanup() {
       rname="$(echo "$runners_json" | jq -r --arg i "$rid" '.[]? | select(.id == $i) | .name // "?"')"
       delete_daytona_runner "$rname" "$rid" || true
       count=$((count + 1))
-    done <<< "$cmc_runner_ids"
+    done <<< "$byoc_runner_ids"
     ok "  $count runners processed"
   else
-    ok "  no CMC runners to delete"
+    ok "  no BYOC runners to delete"
   fi
 
   # Brief pause for Daytona Cloud to reflect the runner deletions
   [[ "$DRY_RUN" != "true" ]] && sleep 2
 
   # Delete regions
-  if [[ -n "$cmc_region_ids" ]]; then
-    log "  deleting CMC regions from Daytona Cloud:"
+  if [[ -n "$byoc_region_ids" ]]; then
+    log "  deleting BYOC regions from Daytona Cloud:"
     local count=0
     while IFS= read -r rid; do
       [[ -z "$rid" ]] && continue
@@ -245,10 +245,10 @@ daytona_cloud_cleanup() {
         esac
       fi
       count=$((count + 1))
-    done <<< "$cmc_region_ids"
+    done <<< "$byoc_region_ids"
     ok "  $count regions processed"
   else
-    ok "  no CMC regions to delete"
+    ok "  no BYOC regions to delete"
   fi
 }
 
@@ -268,7 +268,7 @@ helm_uninstall_best_effort() {
 
 # ---- 3. GCE instances (standalone runner VMs — NOT GKE node VMs) ----
 gce_instances_cleanup() {
-  log "GCE: discovering CMC runner instances project-wide"
+  log "GCE: discovering BYOC runner instances project-wide"
   local list
   # Catch: anything named gke-runner-*  OR  any instance with our labels.
   list="$(gcloud compute instances list --project="$GCP_PROJECT" \
@@ -294,7 +294,7 @@ gce_instances_cleanup() {
 
 # ---- 4. GKE clusters (this also nukes the GKE-managed node VMs in MIGs) ----
 gke_clusters_cleanup() {
-  log "GKE: discovering CMC clusters project-wide"
+  log "GKE: discovering BYOC clusters project-wide"
   # gcloud container clusters list with --filter doesn't accept name patterns
   # well across all gcloud versions, so we list all and grep.
   local clusters
@@ -309,7 +309,7 @@ gke_clusters_cleanup() {
   local any=false
   while IFS=$'\t' read -r name location; do
     [[ -z "$name" ]] && continue
-    case "$name" in daytona-cmc-gke-*) ;; *) continue ;; esac
+    case "$name" in daytona-byoc-gke-*) ;; *) continue ;; esac
     any=true
     log "  deleting GKE cluster $name (location=$location) — this also deletes its node VMs and load balancers"
     # `location` works for both regional + zonal clusters.
@@ -320,15 +320,15 @@ gke_clusters_cleanup() {
       warn "  delete failed for $name"
     fi
   done <<< "$clusters"
-  [[ "$any" == "false" ]] && ok "  no daytona-cmc-gke-* clusters found"
+  [[ "$any" == "false" ]] && ok "  no daytona-byoc-gke-* clusters found"
 }
 
 # ---- 5. Firewall rules ----
 firewall_rules_cleanup() {
-  log "VPC: discovering CMC firewall rules"
+  log "VPC: discovering BYOC firewall rules"
   local rules
   rules="$(gcloud compute firewall-rules list --project="$GCP_PROJECT" \
-    --filter='(name ~ "-(runner-ingress|iap-ssh)$") OR (name ~ "^gke-cmc-")' \
+    --filter='(name ~ "-(runner-ingress|iap-ssh)$") OR (name ~ "^gke-byoc-")' \
     --format='value(name)' 2>/dev/null || true)"
 
   if [[ -z "$rules" ]]; then
@@ -351,16 +351,16 @@ firewall_rules_cleanup() {
 
 # ---- 6. GCS buckets ----
 gcs_buckets_cleanup() {
-  log "GCS: discovering CMC snapshot buckets"
+  log "GCS: discovering BYOC snapshot buckets"
   # gcloud storage buckets list returns gs://name URLs
   local buckets
   buckets="$(gcloud storage buckets list --project="$GCP_PROJECT" \
     --format='value(name)' 2>/dev/null \
     | sed 's|^gs://||;s|/$||' \
-    | grep -E '^gke-cmc-.*-snapshots$' || true)"
+    | grep -E '^gke-byoc-.*-snapshots$' || true)"
 
   if [[ -z "$buckets" ]]; then
-    ok "  no CMC buckets found"
+    ok "  no BYOC buckets found"
     return 0
   fi
 
@@ -386,7 +386,7 @@ gcs_buckets_cleanup() {
 # convention OR named by the gcr-setup.sh default. Safe to run when no
 # repos exist.
 gar_repos_cleanup() {
-  log "Artifact Registry: discovering CMC repositories"
+  log "Artifact Registry: discovering BYOC repositories"
   local repos
   # The default repo name from gcr-setup.sh is 'daytona-images'. We also
   # accept any repo with label managed-by=gcs-repro for forward-compat.
@@ -395,7 +395,7 @@ gar_repos_cleanup() {
     awk -F/ '/\/repositories\/daytona-images$|\/repositories\/daytona-/ {print $NF "\t" $(NF-2)}' || true)"
 
   if [[ -z "$repos" ]]; then
-    ok "  no CMC GAR repositories found"
+    ok "  no BYOC GAR repositories found"
     return 0
   fi
 
@@ -412,7 +412,7 @@ gar_repos_cleanup() {
 
 # ---- 7. HMAC keys (must deactivate before delete) ----
 hmac_keys_cleanup() {
-  log "GCS: discovering HMAC keys for CMC service accounts"
+  log "GCS: discovering HMAC keys for BYOC service accounts"
   local keys
   # List ALL HMAC keys in the project; filter to ones belonging to our SAs.
   keys="$(gcloud storage hmac list --project="$GCP_PROJECT" \
@@ -443,12 +443,12 @@ hmac_keys_cleanup() {
       fi
     fi
   done <<< "$keys"
-  (( count == 0 )) && ok "  no CMC HMAC keys to delete"
+  (( count == 0 )) && ok "  no BYOC HMAC keys to delete"
 }
 
 # ---- 8. Service accounts ----
 service_accounts_cleanup() {
-  log "IAM: discovering CMC service accounts"
+  log "IAM: discovering BYOC service accounts"
   # Includes:
   #   dt-snap-*    snapshot-manager bucket access (HMAC owner)
   #   dt-runner-*  runner VM identity (Secret Manager accessor)
@@ -461,7 +461,7 @@ service_accounts_cleanup() {
     --format='value(email)' 2>/dev/null || true)"
 
   if [[ -z "$accts" ]]; then
-    ok "  no CMC service accounts found"
+    ok "  no BYOC service accounts found"
     return 0
   fi
 
@@ -487,7 +487,7 @@ service_accounts_cleanup() {
 
 # ---- 9. Secret Manager secrets ----
 secrets_cleanup() {
-  log "Secret Manager: discovering CMC secrets"
+  log "Secret Manager: discovering BYOC secrets"
   # We use name-based discovery (anything starting with "daytona-") and
   # ALSO label-based for belt-and-suspenders.
   local secrets
@@ -508,7 +508,7 @@ secrets_cleanup() {
   all_secrets="$(printf '%s\n%s\n' "$secrets" "$label_secrets" | awk 'NF && !seen[$0]++')"
 
   if [[ -z "$all_secrets" ]]; then
-    ok "  no CMC secrets found"
+    ok "  no BYOC secrets found"
     return 0
   fi
 
@@ -533,7 +533,7 @@ cloudflare_cleanup() {
     return 0
   fi
 
-  log "Cloudflare: removing CMC DNS records for $DOMAIN"
+  log "Cloudflare: removing BYOC DNS records for $DOMAIN"
   local CF_API="https://api.cloudflare.com/client/v4"
   local CF_AUTH=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
   local candidate="$DOMAIN" zone_id=""
@@ -574,14 +574,14 @@ local_state_cleanup() {
     fi
   fi
   if command -v kubectl >/dev/null 2>&1; then
-    # Find any kubeconfig contexts named gke_<project>_<loc>_daytona-cmc-gke-*
+    # Find any kubeconfig contexts named gke_<project>_<loc>_daytona-byoc-gke-*
     kubectl config get-contexts -o name 2>/dev/null \
-      | grep -E "^gke_${GCP_PROJECT}_.*_daytona-cmc-gke-" \
+      | grep -E "^gke_${GCP_PROJECT}_.*_daytona-byoc-gke-" \
       | while read -r ctx; do
           run kubectl config delete-context "$ctx" >/dev/null 2>&1 || true
         done
     kubectl config get-clusters 2>/dev/null \
-      | grep -E "^gke_${GCP_PROJECT}_.*_daytona-cmc-gke-" \
+      | grep -E "^gke_${GCP_PROJECT}_.*_daytona-byoc-gke-" \
       | while read -r cl; do
           run kubectl config delete-cluster "$cl" >/dev/null 2>&1 || true
         done
@@ -596,8 +596,8 @@ inventory() {
 
   local n
   n="$(gcloud container clusters list --project="$GCP_PROJECT" --format='value(name)' 2>/dev/null \
-      | grep -c '^daytona-cmc-gke-' || true)"
-  echo "    GKE clusters         : $n  (daytona-cmc-gke-*)"
+      | grep -c '^daytona-byoc-gke-' || true)"
+  echo "    GKE clusters         : $n  (daytona-byoc-gke-*)"
 
   n="$(gcloud compute instances list --project="$GCP_PROJECT" \
       --filter='(name ~ "^gke-runner-") OR (labels.managed-by="gcs-repro")' \
@@ -605,13 +605,13 @@ inventory() {
   echo "    Runner VMs           : $n  (gke-runner-* and managed-by=gcs-repro)"
 
   n="$(gcloud compute firewall-rules list --project="$GCP_PROJECT" \
-      --filter='(name ~ "-(runner-ingress|iap-ssh)$") OR (name ~ "^gke-cmc-")' \
+      --filter='(name ~ "-(runner-ingress|iap-ssh)$") OR (name ~ "^gke-byoc-")' \
       --format='value(name)' 2>/dev/null | grep -vcE '^gke-[^-]+-(master|vms|all|ssh)$' || true)"
   echo "    Firewall rules       : $n"
 
   n="$(gcloud storage buckets list --project="$GCP_PROJECT" --format='value(name)' 2>/dev/null \
-      | sed 's|^gs://||;s|/$||' | grep -cE '^gke-cmc-.*-snapshots$' || true)"
-  echo "    GCS buckets          : $n  (gke-cmc-*-snapshots)"
+      | sed 's|^gs://||;s|/$||' | grep -cE '^gke-byoc-.*-snapshots$' || true)"
+  echo "    GCS buckets          : $n  (gke-byoc-*-snapshots)"
 
   n="$(gcloud artifacts repositories list --project="$GCP_PROJECT" \
       --format='value(name)' 2>/dev/null \
@@ -631,9 +631,9 @@ inventory() {
     local regions_json runners_json rn_count rg_count
     regions_json="$(curl -sS --max-time 15 -H "Authorization: Bearer $DAYTONA_API_KEY" "$DAYTONA_API_URL/regions" 2>/dev/null || echo '[]')"
     runners_json="$(curl -sS --max-time 15 -H "Authorization: Bearer $DAYTONA_API_KEY" "$DAYTONA_API_URL/runners" 2>/dev/null || echo '[]')"
-    rg_count="$(echo "$regions_json" | jq '[.[]? | select((.name // "") | startswith("gke-cmc-"))] | length')"
+    rg_count="$(echo "$regions_json" | jq '[.[]? | select((.name // "") | startswith("gke-byoc-"))] | length')"
     rn_count="$(echo "$runners_json" | jq '[.[]? | select((.name // "") | startswith("gke-runner-"))] | length')"
-    echo "    Daytona regions      : $rg_count  (gke-cmc-* in Daytona Cloud)"
+    echo "    Daytona regions      : $rg_count  (gke-byoc-* in Daytona Cloud)"
     echo "    Daytona runners      : $rn_count  (gke-runner-* in Daytona Cloud)"
   else
     echo "    Daytona Cloud        : (DAYTONA_API_KEY not set — won't clean up)"
@@ -685,13 +685,13 @@ echo
 echo "  Teardown complete."
 echo
 echo "  Verify with:"
-echo "    gcloud container clusters list --project=$GCP_PROJECT --filter='name~daytona-cmc-gke-'"
+echo "    gcloud container clusters list --project=$GCP_PROJECT --filter='name~daytona-byoc-gke-'"
 echo "    gcloud compute instances list  --project=$GCP_PROJECT --filter='(name~^gke-runner-) OR (labels.managed-by=gcs-repro)'"
-echo "    gcloud storage buckets list    --project=$GCP_PROJECT --filter='name~^gke-cmc-.*-snapshots\$'"
+echo "    gcloud storage buckets list    --project=$GCP_PROJECT --filter='name~^gke-byoc-.*-snapshots\$'"
 echo "    gcloud artifacts repositories list --project=$GCP_PROJECT --filter='name~daytona-'"
 echo "    gcloud iam service-accounts list --project=$GCP_PROJECT --filter='email~^(dt-snap|dt-runner|dt-gar)-'"
 echo "    gcloud secrets list            --project=$GCP_PROJECT --filter='name~daytona-'"
-echo "    gcloud compute firewall-rules list --project=$GCP_PROJECT --filter='name~^gke-cmc-'"
+echo "    gcloud compute firewall-rules list --project=$GCP_PROJECT --filter='name~^gke-byoc-'"
 echo
 echo "  Cannot be undone programmatically (rotate manually if you're done testing):"
 echo "    - Personal Daytona API keys at https://app.daytona.io/dashboard/keys"

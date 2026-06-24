@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC (Customer Managed Compute) on AWS — end-to-end reproducer
+# Daytona BYOC on AWS — end-to-end deployment
 # =============================================================================
 #
-# Walks through the FULL customer journey for deploying Daytona BYOC on AWS:
+# Walks through the FULL deployment of Daytona BYOC on AWS:
 #
 #   Phase 1-4: preflight (tools, AWS auth, Daytona key, Cloudflare token)
 #   Phase 5-6: AWS S3 bucket + IAM user (used by snapshot-manager AND runners)
@@ -16,13 +16,13 @@
 #                builder S3 env vars to point at the same bucket)
 #   Phase 15: SDK validation — create a sandbox targeting the new region
 #
-# The customer keeps using Daytona Cloud (app.daytona.io) as the CONTROL PLANE.
-# Their EKS cluster hosts the region INFRASTRUCTURE (proxy + snapshot manager).
-# Their EC2 instances are the COMPUTE (run the sandboxes themselves).
+# You keep using Daytona Cloud (app.daytona.io) as the CONTROL PLANE.
+# Your EKS cluster hosts the region INFRASTRUCTURE (proxy + snapshot manager).
+# Your EC2 instances are the COMPUTE (run the sandboxes themselves).
 #
 # Required env vars:
 #   DAYTONA_API_KEY      - personal API key from app.daytona.io/dashboard/keys
-#   DOMAIN               - FQDN you own, e.g. cmc.yourdomain.com. Used for
+#   DOMAIN               - FQDN you own, e.g. byoc.yourdomain.com. Used for
 #                          proxy.${DOMAIN} and snapshots.${DOMAIN}.
 #   ACME_EMAIL           - email for Let's Encrypt registration
 #   CLOUDFLARE_API_TOKEN - Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)
@@ -37,7 +37,7 @@
 # Optional (with defaults):
 #   DAYTONA_API_URL          https://app.daytona.io/api
 #   AWS_DEFAULT_REGION       us-east-1
-#   CLUSTER_NAME             daytona-cmc-aws (suffixed with stable hash)
+#   CLUSTER_NAME             daytona-byoc-aws (suffixed with stable hash)
 #   K8S_VERSION              1.30
 #   NODE_INSTANCE_TYPE       m7i.large       (for EKS control-plane pods)
 #   NODE_COUNT               2               (EKS node count for control)
@@ -45,7 +45,7 @@
 #                                              16 sandboxes × 4 vCPU × 2x over-prov sizing)
 #   RUNNER_INSTANCE_TYPE     m7i.2xlarge
 #   RUNNER_VOLUME_GB         100
-#   REGION_NAME              eks-cmc-<timestamp>   (auto)
+#   REGION_NAME              eks-byoc-<timestamp>   (auto)
 #   RUNNER_NAME_PREFIX       eks-runner            (each instance gets a numeric suffix)
 #   STAGING                  false                 (LE staging vs prod CA)
 #   PHASE                    5                     (1..5 — stop after this phase)
@@ -79,7 +79,7 @@ export AWS_DEFAULT_REGION="$AWS_REGION"
 # Stable cluster name suffix derived from $DOMAIN so re-runs hit the same
 # cluster. Keeps the cluster name <40 chars (eksctl/CloudFormation limit).
 _hash="$(printf '%s' "$DOMAIN" | shasum | cut -c1-6)"
-CLUSTER_NAME="${CLUSTER_NAME:-daytona-cmc-aws-$_hash}"
+CLUSTER_NAME="${CLUSTER_NAME:-daytona-byoc-aws-$_hash}"
 K8S_VERSION="${K8S_VERSION:-1.30}"
 NODE_INSTANCE_TYPE="${NODE_INSTANCE_TYPE:-m7i.large}"
 NODE_COUNT="${NODE_COUNT:-2}"
@@ -89,7 +89,7 @@ RUNNER_VOLUME_GB="${RUNNER_VOLUME_GB:-100}"
 
 NAMESPACE="${NAMESPACE:-daytona-region}"
 RELEASE="${RELEASE:-daytona-region}"
-CHART_PATH="${CHART_PATH:-$HOME/main/fork/helm-charts/charts/daytona-region}"
+CHART_PATH="${CHART_PATH:-$SCRIPT_DIR/../../../charts/daytona-region}"
 STAGING="${STAGING:-false}"
 SKIP_E2E="${SKIP_E2E:-false}"
 PHASE="${PHASE:-5}"
@@ -101,7 +101,7 @@ if [[ -f "$STATE_DIR/names.env" ]]; then
   # shellcheck disable=SC1091
   source "$STATE_DIR/names.env"
 else
-  REGION_NAME="${REGION_NAME:-eks-cmc-$(date +%s)}"
+  REGION_NAME="${REGION_NAME:-eks-byoc-$(date +%s)}"
   RUNNER_NAME_PREFIX="${RUNNER_NAME_PREFIX:-eks-runner}"
   printf 'REGION_NAME=%q\nRUNNER_NAME_PREFIX=%q\n' \
     "$REGION_NAME" "$RUNNER_NAME_PREFIX" > "$STATE_DIR/names.env"
@@ -935,18 +935,18 @@ wait_for_cert() {
 wait_for_cert proxy-wildcard-cert 180 180 || true
 wait_for_cert snapshots-cert      120 120 || true
 
-# ---------- 14.6 ECR (Customer Question 1) verification setup ----------
+# ---------- 14.6 ECR (private-registry) verification setup ----------
 # Provisions an ECR pull-through cache + IAM role with the broker trust
 # policy + registers the registry in Daytona. Stage C in e2e.sh then drives
 # an actual ECR pull through Daytona's broker flow, giving us live evidence
-# for the customer's Q1.
+# for the ECR registry-auth path.
 #
-# Skip with SKIP_ECR=true if you only care about Q2 (declarative builder).
+# Skip with SKIP_ECR=true if you only care about the declarative builder (S3).
 SKIP_ECR="${SKIP_ECR:-false}"
 if [[ "$SKIP_ECR" == "true" ]]; then
   log "phase 14.6/15 - SKIP_ECR=true, skipping ECR verification setup"
 else
-  log "phase 14.6/15 - ECR private-registry setup (for Q1 verification)"
+  log "phase 14.6/15 - ECR private-registry setup"
   if DAYTONA_API_KEY="$DAYTONA_API_KEY" \
      DAYTONA_API_URL="$DAYTONA_API_URL" \
      AWS_DEFAULT_REGION="$AWS_REGION" \
@@ -965,10 +965,10 @@ else
   log "phase 15/15 - e2e SDK validation in region $REGION_NAME"
   echo "    Three stages run:"
   echo "      Stage A — public-image sandbox (proves proxy + runner basic path)"
-  echo "      Stage B — declarative builder (Customer Question 2: S3 wiring)"
-  echo "      Stage C — private ECR pull (Customer Question 1: registry auth)"
-  echo "    After the stages, a CUSTOMER QUESTION VERIFICATION RECEIPT prints"
-  echo "    that quotes the original support questions and the evidence for each."
+  echo "      Stage B — declarative builder (S3 wiring)"
+  echo "      Stage C — private ECR pull (registry auth)"
+  echo "    After the stages, a VERIFICATION SUMMARY prints"
+  echo "    that describes what each stage tested and the evidence for each."
   echo
   if DAYTONA_API_URL="$DAYTONA_API_URL" \
      DAYTONA_API_KEY="$DAYTONA_API_KEY" \
@@ -978,7 +978,7 @@ else
        bash "$SCRIPT_DIR/e2e.sh"; then
     ok "e2e SDK validation: all stages passed"
   else
-    warn "e2e SDK validation reported issues — see the verification receipt above for which question(s) were not verified"
+    warn "e2e SDK validation reported issues — see the verification summary above for which stage(s) were not verified"
   fi
 fi
 

@@ -236,6 +236,49 @@ Wait for propagation (usually 30-300s) before continuing.
 EOF
 }
 
+# omc::cloudflare_upsert_dns TOKEN ZONE_ID NAME TYPE CONTENT
+# Create-or-update one DNS record (DNS-only / grey-cloud). Idempotent.
+omc::cloudflare_upsert_dns() {
+  local token="$1" zone_id="$2" name="$3" type="$4" content="$5"
+  local api="https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records"
+  local rec_id body resp ok
+  rec_id="$(curl -sS -H "Authorization: Bearer $token" "${api}?type=${type}&name=${name}" \
+    | jq -r '.result[0].id // empty')"
+  body="$(jq -nc --arg t "$type" --arg n "$name" --arg c "$content" \
+    '{type:$t,name:$n,content:$c,ttl:120,proxied:false}')"
+  if [[ -n "$rec_id" ]]; then
+    resp="$(curl -sS -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "$body" "${api}/${rec_id}")"
+  else
+    resp="$(curl -sS -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "$body" "${api}")"
+  fi
+  ok="$(printf '%s' "$resp" | jq -r '.success')"
+  if [[ "$ok" == "true" ]]; then
+    omc::log INFO "  Cloudflare ${type} ${name} -> ${content} (DNS-only)"
+  else
+    omc::log WARN "  Cloudflare ${type} ${name} FAILED: $(printf '%s' "$resp" | jq -c '.errors')"
+    return 1
+  fi
+}
+
+# omc::cloudflare_region_dns TOKEN BASE_DOMAIN LB_TARGET
+# Upsert the region's routing records (proxy, *.proxy, snapshots) -> the ingress
+# LoadBalancer. CNAME for an AWS NLB hostname, A for an IP. ALL DNS-only: the
+# proxy carries long websockets + large uploads and the wildcard preview certs
+# come from cert-manager — neither survives Cloudflare's HTTP proxy. Assumes the
+# Cloudflare zone IS the base domain.
+omc::cloudflare_region_dns() {
+  local token="$1" base="$2" target="$3"
+  local zone_id rtype=CNAME
+  zone_id="$(curl -sS -H "Authorization: Bearer $token" \
+    "https://api.cloudflare.com/client/v4/zones?name=${base}" | jq -r '.result[0].id // empty')"
+  [[ -n "$zone_id" ]] || omc::die "Cloudflare zone '${base}' not found (token lacks access or zone name differs)."
+  [[ "$target" =~ ^[0-9.]+$ ]] && rtype=A
+  omc::log INFO "Upserting Cloudflare DNS in zone ${base} (${rtype} -> ${target})..."
+  omc::cloudflare_upsert_dns "$token" "$zone_id" "proxy.${base}"     "$rtype" "$target"
+  omc::cloudflare_upsert_dns "$token" "$zone_id" "*.proxy.${base}"   "$rtype" "$target"
+  omc::cloudflare_upsert_dns "$token" "$zone_id" "snapshots.${base}" "$rtype" "$target"
+}
+
 # ---------------------------------------------------------------- helm helpers
 # omc::ingress_nginx_install [namespace=ingress-nginx]
 # Critical: pass TCP probe annotations on the LB Service. Azure Standard LB defaults
@@ -248,12 +291,43 @@ omc::ingress_nginx_install() {
   local ns="${1:-ingress-nginx}"
   helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx >/dev/null 2>&1 || true
   helm repo update >/dev/null
+  # A prior failed/pending install blocks re-install ("another operation in
+  # progress"); clear any non-deployed release first so re-runs are reliable.
+  local st
+  st="$(helm status ingress-nginx -n "$ns" -o json 2>/dev/null | jq -r '.info.status' 2>/dev/null || true)"
+  if [[ -n "$st" && "$st" != "deployed" ]]; then
+    omc::log WARN "ingress-nginx release is '$st' (prior failed install) — uninstalling before reinstall."
+    helm uninstall ingress-nginx -n "$ns" >/dev/null 2>&1 || true
+  fi
+  # The cluster's only node group is the sandbox pool, tainted
+  # sandbox=true:NoSchedule (reserved for the daytona-region runner DaemonSet).
+  # Platform add-ons must tolerate it or they sit Pending — the admission-webhook
+  # Job never completes and helm --wait dies with "context deadline exceeded".
+  # Tolerate it on the controller AND the admission patch Jobs.
+  local tol; tol="$(mktemp)"
+  cat > "$tol" <<'EOF'
+controller:
+  tolerations:
+    - key: sandbox
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  admissionWebhooks:
+    patch:
+      tolerations:
+        - key: sandbox
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+EOF
   helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
     -n "$ns" --create-namespace \
     --set-string "controller.service.annotations.service\.beta\.kubernetes\.io/port_80_health-probe_protocol=tcp" \
     --set-string "controller.service.annotations.service\.beta\.kubernetes\.io/port_443_health-probe_protocol=tcp" \
+    -f "$tol" \
     --wait --timeout 5m \
-    || omc::die "ingress-nginx install failed"
+    || { rm -f "$tol"; omc::die "ingress-nginx install failed"; }
+  rm -f "$tol"
   omc::log INFO "ingress-nginx ready in $ns (TCP probes on 80/443)"
 }
 
@@ -262,12 +336,75 @@ omc::cert_manager_install() {
   local ns="${1:-cert-manager}"
   helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
   helm repo update >/dev/null
+  local st
+  st="$(helm status cert-manager -n "$ns" -o json 2>/dev/null | jq -r '.info.status' 2>/dev/null || true)"
+  if [[ -n "$st" && "$st" != "deployed" ]]; then
+    omc::log WARN "cert-manager release is '$st' (prior failed install) — uninstalling before reinstall."
+    helm uninstall cert-manager -n "$ns" >/dev/null 2>&1 || true
+  fi
+  # Same single-tainted-node-pool constraint as ingress-nginx: tolerate the
+  # sandbox taint on the controller, webhook, cainjector AND the startupapicheck
+  # Job (which helm --wait blocks on).
+  local tol; tol="$(mktemp)"
+  cat > "$tol" <<'EOF'
+tolerations:
+  - key: sandbox
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+webhook:
+  tolerations:
+    - key: sandbox
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+cainjector:
+  tolerations:
+    - key: sandbox
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+startupapicheck:
+  tolerations:
+    - key: sandbox
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+EOF
   helm upgrade --install cert-manager jetstack/cert-manager \
     -n "$ns" --create-namespace \
     --set crds.enabled=true \
+    -f "$tol" \
     --wait --timeout 5m \
-    || omc::die "cert-manager install failed"
+    || { rm -f "$tol"; omc::die "cert-manager install failed"; }
+  rm -f "$tol"
   omc::log INFO "cert-manager ready in $ns"
+}
+
+# omc::coredns_tolerate_taint [key=sandbox] [value=true] [effect=NoSchedule]
+# The only node pool is tainted sandbox=true:NoSchedule, but CoreDNS (a
+# kube-system Deployment) ships without that toleration — so it sits Pending and
+# the cluster has NO DNS. In-cluster calls then fail to resolve (e.g. the region
+# registration hook curling app.daytona.io exits non-zero). Add the toleration
+# idempotently so DNS comes up before anything that needs it.
+omc::coredns_tolerate_taint() {
+  local key="${1:-sandbox}" value="${2:-true}" effect="${3:-NoSchedule}"
+  if ! kubectl -n kube-system get deploy coredns >/dev/null 2>&1; then
+    omc::log WARN "coredns deployment not found in kube-system; skipping DNS toleration patch."
+    return 0
+  fi
+  if kubectl -n kube-system get deploy coredns \
+       -o jsonpath='{.spec.template.spec.tolerations[*].key}' 2>/dev/null \
+       | tr ' ' '\n' | grep -qx "$key"; then
+    omc::log INFO "coredns already tolerates ${key}=${value}:${effect}."
+    return 0
+  fi
+  omc::log INFO "Patching coredns to tolerate ${key}=${value}:${effect} (single tainted node pool)..."
+  kubectl -n kube-system patch deploy coredns --type=json \
+    -p "[{\"op\":\"add\",\"path\":\"/spec/template/spec/tolerations/-\",\"value\":{\"key\":\"${key}\",\"operator\":\"Equal\",\"value\":\"${value}\",\"effect\":\"${effect}\"}}]" \
+    || omc::die "failed to patch coredns tolerations"
+  kubectl -n kube-system rollout status deploy coredns --timeout=120s || true
+  omc::log INFO "coredns patched; cluster DNS should schedule onto the sandbox node."
 }
 
 # omc::cluster_issuer_apply EMAIL
@@ -538,12 +675,120 @@ omc::verify_node_ubuntu() {
 # omc::helm_install_wait RELEASE CHART_PATH NS VALUES_FILE [timeout=10m]
 omc::helm_install_wait() {
   local release="$1" chart="$2" ns="$3" values="$4" timeout="${5:-10m}"
-  helm upgrade --install "$release" "$chart" \
+  # A prior failed/pending install (e.g. a pre-install hook that errored) leaves
+  # the release in a non-deployed state that blocks `helm upgrade --install`
+  # ("has no deployed releases" / "another operation in progress"). Clear it so
+  # a re-run reuses the already-provisioned cluster/IAM/bucket instead of needing
+  # a teardown. Real (deployed) releases are upgraded in place, untouched.
+  local st
+  st="$(helm status "$release" -n "$ns" -o json 2>/dev/null | jq -r '.info.status' 2>/dev/null || true)"
+  if [[ -n "$st" && "$st" != "deployed" ]]; then
+    omc::log WARN "$release release is '$st' (prior failed install) — uninstalling before reinstall."
+    helm uninstall "$release" -n "$ns" >/dev/null 2>&1 || true
+  fi
+  if helm upgrade --install "$release" "$chart" \
     -n "$ns" --create-namespace \
     -f "$values" \
-    --wait --timeout "$timeout" \
-    || omc::die "helm install of $release failed"
-  omc::log INFO "$release deployed in $ns"
+    --wait --timeout "$timeout"; then
+    omc::log INFO "$release deployed in $ns"
+    return 0
+  fi
+  # Install failed. Surface logs of any non-Running/Completed pods (e.g. a failed
+  # pre-install hook like region-registration) BEFORE the Job's
+  # ttlSecondsAfterFinished deletes them — otherwise the only signal is helm's
+  # opaque "Job Failed" and the real reason (HTTP status/body) is unreachable.
+  omc::log ERROR "helm install of $release failed — diagnostics from namespace $ns:"
+  kubectl get pods,jobs -n "$ns" 2>/dev/null >&2 || true
+  local p
+  for p in $(kubectl get pods -n "$ns" --no-headers 2>/dev/null | awk '$3!="Running"{print $1}'); do
+    printf '----- logs %s/%s -----\n' "$ns" "$p" >&2
+    kubectl logs -n "$ns" "$p" --tail=80 --all-containers --prefix 2>&1 | tail -80 >&2 || true
+  done
+  # Events survive even when Helm has already deleted a failed pre-install hook's
+  # pod (Helm 4 cleans up the failed hook before returning), so they are often
+  # the only post-mortem signal left. They won't show the HTTP body, though — for
+  # that, replicate the registration call (see docs / the GET checks below).
+  printf '----- recent events in %s -----\n' "$ns" >&2
+  kubectl get events -n "$ns" --sort-by=.lastTimestamp 2>/dev/null | tail -25 >&2 || true
+  omc::die "helm install of $release failed"
+}
+
+# ---------------------------------------------------------------- ssh gateway
+# omc::ssh_keys_ensure STATE_DIR
+# Generates (or reuses, for idempotent re-runs) the SSH keypairs the
+# daytona-region chart requires:
+#   ssh-client       - keypair the GATEWAY uses to authenticate into sandboxes;
+#                      its PUBLIC key must also reach the runners (SSH_PUBLIC_KEY)
+#                      or sandboxes refuse gateway connections (silent SSH-only
+#                      failure: everything else works).
+#   ssh-gateway-host - the gateway's SSH host key.
+# Values contract (chart QUICKSTART): values are base64 of the key FILES.
+# Exports PRIV_CLIENT_B64 / PUB_CLIENT_B64 / PRIV_GATEWAY_B64 for envsubst.
+omc::ssh_keys_ensure() {
+  local dir="$1"
+  [[ -f "$dir/ssh-client" ]]       || ssh-keygen -t ed25519 -N "" -C client-key   -f "$dir/ssh-client" -q
+  [[ -f "$dir/ssh-gateway-host" ]] || ssh-keygen -t ed25519 -N "" -C gateway-host -f "$dir/ssh-gateway-host" -q
+  chmod 600 "$dir/ssh-client" "$dir/ssh-gateway-host"
+  # macOS base64 has no -w0; strip newlines portably (GNU wraps at 76 cols).
+  PRIV_CLIENT_B64="$(base64 < "$dir/ssh-client" | tr -d '\n')"
+  PUB_CLIENT_B64="$(base64 < "$dir/ssh-client.pub" | tr -d '\n')"
+  PRIV_GATEWAY_B64="$(base64 < "$dir/ssh-gateway-host" | tr -d '\n')"
+  export PRIV_CLIENT_B64 PUB_CLIENT_B64 PRIV_GATEWAY_B64
+  omc::log INFO "SSH keypairs ready in $dir (ssh-client + ssh-gateway-host)"
+}
+
+# omc::region_sshgateway_finalize NS RELEASE CHART_PATH VALUES_FILE API_URL API_KEY
+# Post-registration SSH gateway finalization. Must run AFTER helm install (the
+# chart's registration hook creates <release>-region-config on install):
+#   1. advertise the gateway LoadBalancer to Daytona Cloud (sshGatewayUrl) —
+#      regenerate-ssh-gateway-api-key 400s until the region has one, so this
+#      must come first;
+#   2. fetch the REGION-SCOPED ssh-gateway api key — the org key the values
+#      bootstrap with passes boot but 403s on ValidateSshAccess, so SSH
+#      sessions would close right after the handshake;
+#   3. roll it into the release via a persisted overlay (the gateway has no
+#      secret-checksum annotation, so bounce the pod to pick it up).
+# Writes the key overlay next to VALUES_FILE; future manual `helm upgrade`
+# runs must pass BOTH -f files or the gateway reverts to the org key.
+omc::region_sshgateway_finalize() {
+  local ns="$1" release="$2" chart="$3" values="$4" api_url="$5" api_key="$6"
+  local overlay region_id gw_key gw_addr
+  overlay="$(dirname "$values")/values-sshgateway-key.yaml"
+
+  region_id="$(kubectl -n "$ns" get secret "${release}-region-config" -o jsonpath='{.data.id}' 2>/dev/null | base64 -d || true)"
+  [[ -n "$region_id" ]] || omc::die "${release}-region-config secret missing — did the registration hook run?"
+
+  # 1. Advertise the gateway LoadBalancer FIRST. regenerate-ssh-gateway-api-key
+  #    400s ("Region does not have an SSH gateway URL configured") until the
+  #    region carries an sshGatewayUrl, so this PATCH is a prerequisite — not the
+  #    finishing touch its position once implied.
+  gw_addr="$(omc::wait_lb_address "$ns" "${release}-ssh-gateway" 300 2>/dev/null)" || true
+  [[ -n "$gw_addr" ]] || omc::die "ssh-gateway LoadBalancer has no address after 5m — cannot set sshGatewayUrl (the key regeneration below depends on it)"
+  curl -sf --retry 4 --retry-all-errors --retry-delay 3 -X PATCH -H "Authorization: Bearer ${api_key}" -H 'Content-Type: application/json' \
+    -d "{\"sshGatewayUrl\":\"ssh://${gw_addr}:2222\"}" \
+    "${api_url}/regions/${region_id}" >/dev/null \
+    || omc::die "could not PATCH sshGatewayUrl ssh://${gw_addr}:2222 for region ${region_id}"
+  omc::log INFO "Registered sshGatewayUrl ssh://${gw_addr}:2222 for region ${region_id}"
+
+  # 2. Now that the region has a gateway URL, mint the region-scoped key.
+  gw_key="$(curl -sf --retry 4 --retry-all-errors --retry-delay 3 -X POST -H "Authorization: Bearer ${api_key}" \
+    "${api_url}/regions/${region_id}/regenerate-ssh-gateway-api-key" | jq -r '.apiKey // empty')"
+  [[ -n "$gw_key" ]] || omc::die "could not obtain region-scoped ssh-gateway api key for region ${region_id}"
+
+  # 3. Roll the key into the release; the gateway has no secret-checksum
+  #    annotation, so bounce the pod to pick it up.
+  {
+    printf '# Region-scoped ssh-gateway key (regenerate-ssh-gateway-api-key).\n'
+    printf '# Pass this file IN ADDITION to the main values on every helm upgrade.\n'
+    printf 'services:\n  sshGateway:\n    apiKey: "%s"\n' "$gw_key"
+  } > "$overlay"
+  chmod 600 "$overlay"
+
+  helm upgrade "$release" "$chart" -n "$ns" -f "$values" -f "$overlay" \
+    --wait --timeout 5m >/dev/null \
+    || omc::die "helm upgrade with region ssh-gateway key failed"
+  kubectl -n "$ns" delete pod -l app.kubernetes.io/component=ssh-gateway --ignore-not-found >/dev/null 2>&1 || true
+  omc::log INFO "ssh-gateway now uses the region-scoped api key (overlay: $overlay)"
 }
 
 # ---------------------------------------------------------------- cache

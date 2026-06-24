@@ -3,10 +3,10 @@
 # Daytona BYOC (GCP) — snapshot-creation diagnostic
 # =============================================================================
 #
-# Runs 7 read-only checks against your CMC deployment to pin down where a
+# Runs 7 read-only checks against your BYOC deployment to pin down where a
 # dashboard "Create Snapshot" 500 is coming from:
 #
-#   1. List CMC runner VMs + their zones (project-wide, label-based)
+#   1. List BYOC runner VMs + their zones (project-wide, label-based)
 #   2. Docker Hub pull test from each runner (catches rate-limiting)
 #   3. systemd unit envs on each runner (verifies snapshot-mgr basic-auth
 #      + GCS HMAC creds are baked in)
@@ -39,7 +39,7 @@ command -v gcloud  >/dev/null 2>&1 || { echo "gcloud not on PATH" >&2; exit 1; }
 command -v kubectl >/dev/null 2>&1 || { echo "kubectl not on PATH" >&2; exit 1; }
 
 echo
-echo "─── 1. CMC runners + zones (project-wide, by label+name) ──────────────"
+echo "─── 1. BYOC runners + zones (project-wide, by label+name) ──────────────"
 gcloud compute instances list --project="$GCP_PROJECT" \
   --filter="labels.managed-by=gcs-repro AND name~$RUNNER_NAME_RE" \
   --format='table(name,zone.basename(),status,machineType.basename(),networkInterfaces[0].accessConfigs[0].natIP)'
@@ -49,7 +49,7 @@ runners_tsv="$(gcloud compute instances list --project="$GCP_PROJECT" \
   --format='value(name,zone.basename())')"
 
 if [[ -z "$runners_tsv" ]]; then
-  echo "  No CMC runner VMs found. Either teardown ran, or labels are missing."
+  echo "  No BYOC runner VMs found. Either teardown ran, or labels are missing."
   echo "  Try: gcloud compute instances list --project=$GCP_PROJECT"
   exit 1
 fi

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC reproducer (GCP) — end-to-end SDK validation
+# Daytona BYOC (GCP) — end-to-end SDK validation
 # =============================================================================
-# Tests TWO distinct paths in the BYOC region and produces a verification
-# receipt at the end.
+# Tests TWO distinct paths in the BYOC region and prints a verification
+# summary at the end. Each stage notes what it tests and why.
 #
 #   STAGE A — PUBLIC IMAGE PATH (registry pull, no build context)
 #     Image.base('alpine:3.21')  →  sandbox from a small public image.
@@ -14,7 +14,7 @@
 #     What this proves: proxy + at least one runner + registry pull work.
 #     What this DOES NOT prove: that GCS is correctly wired on both ends.
 #
-#   STAGE B — DECLARATIVE BUILDER PATH  (Customer Question 2 — GCS wiring)
+#   STAGE B — DECLARATIVE BUILDER PATH  (GCS wiring verification)
 #     Image.debian_slim('3.12').pip_install(...)  →  builds an image,
 #     creates a snapshot, then a sandbox from it.
 #     What this proves: the SDK can upload build context to the
@@ -23,7 +23,7 @@
 #     AWS_*-shaped HMAC env vars + AWS_ENDPOINT_URL=storage.googleapis.com,
 #     AND `docker build` runs to completion, AND the resulting sandbox can
 #     execute the pip-installed package. We also dump the GCS bucket object
-#     count before/after so the receipt at the end shows hard evidence that
+#     count before/after so the summary at the end shows hard evidence that
 #     GCS was actually touched.
 #
 # Required env (set by repro.sh):
@@ -40,6 +40,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 STATE_DIR="$SCRIPT_DIR/.state"
+
+# Pick up cluster identity + API creds saved by up.sh (.state/prompts.env) so
+# the operator can run `bash e2e.sh` right after up.sh without re-exporting.
+[[ -f "$STATE_DIR/prompts.env" ]] && { set -a; . "$STATE_DIR/prompts.env"; set +a; }
 
 DAYTONA_API_URL="${DAYTONA_API_URL:?required}"
 DAYTONA_API_KEY="${DAYTONA_API_KEY:?required}"
@@ -84,7 +88,7 @@ python3 -c "import daytona" 2>/dev/null || {
 
 # Self-contained python file so we can apply the urllib3 monkey-patch (for LE
 # staging certs) BEFORE importing the daytona SDK.
-cat > /tmp/cmc-gcp-e2e.py <<'PYEOF'
+cat > /tmp/byoc-gcp-e2e.py <<'PYEOF'
 import os
 import sys
 import ssl
@@ -233,7 +237,7 @@ elif Image is None or CreateSandboxFromImageParams is None:
     print("  -> upgrade the SDK to test the declarative builder: pip install -U 'daytona==0.183.*'")
     results["B"]["status"] = "skipped"
 else:
-    banner("B", "DECLARATIVE BUILDER PATH - Customer Question 2 (GCS wiring)")
+    banner("B", "DECLARATIVE BUILDER PATH - GCS wiring verification")
     info("Proves both halves of GCS are wired correctly:")
     info("  * SDK upload of build context -> snapshot-manager HMAC creds")
     info("  * Runner download of that context -> runner AWS_* env vars")
@@ -312,9 +316,8 @@ else:
     except Exception as e:
         fail(f"stage B raised: {e!r}")
         info("If the error message mentions 403, AccessDenied, NoSuchKey, or")
-        info("a SignatureDoesNotMatch against the bucket, that's the original")
-        info("pain point - the runner is missing AWS_* env vars or pointing")
-        info("at the wrong bucket. Check each runner with:")
+        info("a SignatureDoesNotMatch against the bucket, the runner is missing")
+        info("AWS_* env vars or pointing at the wrong bucket. Check each runner with:")
         info("  gcloud compute ssh <instance> --tunnel-through-iap")
         info("  sudo grep -E '^Environment=AWS_' /etc/systemd/system/daytona-runner.service")
         traceback.print_exc()
@@ -334,14 +337,14 @@ print()
 
 # ---------------------------------------------------------------- RECEIPT
 print("=" * 70)
-print("  CUSTOMER QUESTION VERIFICATION RECEIPT")
+print("  VERIFICATION SUMMARY")
 print("=" * 70)
 
-# Q (Declarative builder GCS)
+# Declarative builder / GCS wiring
 print()
-print("  Q: \"Creating a snapshot through Daytona's declarative image")
-print("      builder works when the runner is configured with GCS-backed")
-print("      object storage credentials.\"")
+print("  Declarative builder / GCS — validates that the declarative image")
+print("  builder uploads build context to GCS and the runner reads it back")
+print("  with its own credentials.")
 b = results["B"]
 print(f"      Test:       Stage B (declarative builder over GCS)")
 if b["status"] == "pass":
@@ -416,4 +419,4 @@ SKIP_STAGE_B="$SKIP_STAGE_B" \
 GCS_BUCKET="$GCS_BUCKET" \
 GCS_BEFORE_STAGE_B="$GCS_BEFORE_STAGE_B" \
 GCP_PROJECT="$GCP_PROJECT" \
-  python3 /tmp/cmc-gcp-e2e.py
+  python3 /tmp/byoc-gcp-e2e.py

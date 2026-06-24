@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Scenario S-STATIC-QA gate: render each scripts/<cloud>-setup/values-region.yaml.tmpl
+# Static QA gate: render each scripts/<cloud>-setup/values-region.yaml.tmpl
 # with its matching test/fixtures/byoc-prompt-set-<cloud>.env, then helm template +
 # helm lint against charts/daytona-region to confirm the rendered values are valid
-# for the Prompt 1 K8s-native chart surface.
+# for the K8s-native chart surface.
 # This is the STATIC SUBSTITUTE for cloud QA — operator runs real-cloud separately.
 set -uo pipefail
 
@@ -72,11 +72,6 @@ for cloud in aws azure gcs; do
     "scripts/${cloud}-setup/.tests/byoc-prompt-set.env" \
     "charts/daytona-region"
 done
-
-check_template "OSS self-hosted: azure" \
-  "scripts/azure-oss-setup/values-oss.yaml.tmpl" \
-  "scripts/azure-oss-setup/.tests/oss-prompt-set.env" \
-  "charts/daytona"
 
 echo ""
 if [[ $FAIL -eq 0 ]]; then

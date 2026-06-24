@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC (Customer Managed Compute) on Azure - end-to-end reproducer
+# Daytona BYOC on Azure - end-to-end deployment
 # =============================================================================
 #
-# Walks through the FULL customer journey for deploying Daytona BYOC on Azure:
+# Walks through the FULL deployment of Daytona BYOC on Azure:
 #
 #   Phase 1: AKS cluster + ingress + DNS + cert-manager
 #   Phase 2: Azure Blob storage + rclone S3 gateway (for snapshot manager)
@@ -12,13 +12,13 @@
 #   Phase 4: Azure VM provisioned as a Daytona runner, registered to the region
 #   Phase 5: SDK validation - create a sandbox targeting the new region
 #
-# The customer keeps using Daytona Cloud (app.daytona.io) as the CONTROL PLANE.
-# Their AKS cluster hosts the region INFRASTRUCTURE (proxy + snapshot manager).
-# Their Azure VM is the COMPUTE (runs the sandboxes themselves).
+# You keep using Daytona Cloud (app.daytona.io) as the CONTROL PLANE.
+# Your AKS cluster hosts the region INFRASTRUCTURE (proxy + snapshot manager).
+# Your Azure VM is the COMPUTE (runs the sandboxes themselves).
 #
 # Required env vars:
 #   DAYTONA_API_KEY     - personal API key from app.daytona.io/dashboard/keys
-#   DOMAIN              - FQDN you own, e.g. cmc.yourdomain.com. Used for
+#   DOMAIN              - FQDN you own, e.g. byoc.yourdomain.com. Used for
 #                         proxy.${DOMAIN} and snapshots.${DOMAIN}.
 #   ACME_EMAIL          - email for Let's Encrypt registration
 #   CLOUDFLARE_API_TOKEN- Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)
@@ -27,13 +27,13 @@
 # Optional (with defaults):
 #   DAYTONA_API_URL       https://app.daytona.io/api
 #   REGION                eastus
-#   RG                    daytona-cmc-rg
-#   AKS_NAME              daytona-cmc-aks
+#   RG                    daytona-byoc-rg
+#   AKS_NAME              daytona-byoc-aks
 #   NODE_COUNT            2
 #   NODE_SKU              Standard_D4s_v4
-#   RUNNER_VM_NAME        daytona-cmc-runner
+#   RUNNER_VM_NAME        daytona-byoc-runner
 #   RUNNER_VM_SKU         Standard_D4s_v3        (the runner needs sysbox-compatible kernel)
-#   REGION_NAME           aks-cmc-<timestamp>    (auto-generated)
+#   REGION_NAME           aks-byoc-<timestamp>    (auto-generated)
 #   RUNNER_NAME           aks-runner-<timestamp> (auto-generated)
 #   STAGING               false                  (LE staging vs prod)
 #   PHASE                 5                      (1..5 - stop after this phase)
@@ -58,11 +58,11 @@ CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN env var}"
 DAYTONA_API_URL="${DAYTONA_API_URL:-https://app.daytona.io/api}"
 SUBSCRIPTION="${SUBSCRIPTION:-}"
 REGION_AZ="${REGION:-eastus}"
-RG="${RG:-daytona-cmc-rg}"
-AKS_NAME="${AKS_NAME:-daytona-cmc-aks}"
+RG="${RG:-daytona-byoc-rg}"
+AKS_NAME="${AKS_NAME:-daytona-byoc-aks}"
 NODE_COUNT="${NODE_COUNT:-2}"
 NODE_SKU="${NODE_SKU:-Standard_D4s_v4}"
-RUNNER_VM_NAME="${RUNNER_VM_NAME:-daytona-cmc-runner}"
+RUNNER_VM_NAME="${RUNNER_VM_NAME:-daytona-byoc-runner}"
 RUNNER_VM_SKU="${RUNNER_VM_SKU:-Standard_D4s_v3}"
 NAMESPACE="${NAMESPACE:-daytona-region}"
 RELEASE="${RELEASE:-daytona-region}"
@@ -72,7 +72,7 @@ SKIP_E2E="${SKIP_E2E:-false}"
 PHASE="${PHASE:-5}"
 
 # Storage / blob
-STORAGE_ACCOUNT="${STORAGE_ACCOUNT:-daytonacmc$(echo -n "$RG" | md5sum 2>/dev/null | cut -c1-8 || md5 -q -s "$RG" | cut -c1-8)}"
+STORAGE_ACCOUNT="${STORAGE_ACCOUNT:-daytonabyoc$(echo -n "$RG" | md5sum 2>/dev/null | cut -c1-8 || md5 -q -s "$RG" | cut -c1-8)}"
 BLOB_BUCKET="${BLOB_BUCKET:-daytona-snapshots}"
 
 # Auto-generated names (timestamp suffix) - written to state for idempotency
@@ -82,7 +82,7 @@ if [[ -f "$STATE_DIR/names.env" ]]; then
   # shellcheck disable=SC1091
   source "$STATE_DIR/names.env"
 else
-  REGION_NAME="${REGION_NAME:-aks-cmc-$(date +%s)}"
+  REGION_NAME="${REGION_NAME:-aks-byoc-$(date +%s)}"
   RUNNER_NAME="${RUNNER_NAME:-aks-runner-$(date +%s)}"
   printf 'REGION_NAME=%q\nRUNNER_NAME=%q\n' "$REGION_NAME" "$RUNNER_NAME" > "$STATE_DIR/names.env"
 fi

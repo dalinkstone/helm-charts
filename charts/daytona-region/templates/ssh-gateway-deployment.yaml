@@ -70,6 +70,13 @@ spec:
       volumes:
         {{- include "daytona.tplvalues.render" (dict "value" .Values.services.sshGateway.extraVolumes "context" $) | nindent 8 }}
       {{- end }}
+      {{- with .Values.dnsPolicy }}
+      dnsPolicy: {{ . }}
+      {{- end }}
+      {{- with .Values.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.services.sshGateway.nodeSelector | default .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

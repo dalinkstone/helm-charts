@@ -18,7 +18,7 @@
 #
 # Inputs (substituted by repro.sh before sending to the VM):
 #   API_URL              - https://app.daytona.io/api
-#   API_KEY              - customer's personal dtn_xxx (used to call POST /api/runners)
+#   API_KEY              - your personal dtn_xxx (used to call POST /api/runners)
 #   RUNNER_API_URL       - public URL where this runner is reachable (https://<vm-ip>:3000)
 #   REGION               - name of the custom region we registered via helm
 #   CAPACITY             - runner sandbox capacity (integer)

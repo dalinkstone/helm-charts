@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC reproducer - teardown
+# Daytona BYOC — teardown
 # =============================================================================
 # Cleans up in the right order:
 #   1. Delete the runner from Daytona Cloud (so the orphan doesn't sit in the
@@ -25,7 +25,7 @@ warn() { printf '\033[1;33m  warn\033[0m %s\n' "$*" ; }
 die()  { printf '\033[1;31m  err\033[0m  %s\n' "$*" >&2 ; exit 1 ; }
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-RG="${RG:-daytona-cmc-rg}"
+RG="${RG:-daytona-byoc-rg}"
 DOMAIN="${DOMAIN:-}"
 DAYTONA_API_URL="${DAYTONA_API_URL:-https://app.daytona.io/api}"
 DAYTONA_API_KEY="${DAYTONA_API_KEY:-}"
@@ -153,7 +153,7 @@ if [[ -d "$STATE_DIR" ]]; then
   ok "removed local state $STATE_DIR"
 fi
 if command -v kubectl >/dev/null 2>&1; then
-  AKS_NAME="${AKS_NAME:-daytona-cmc-aks}"
+  AKS_NAME="${AKS_NAME:-daytona-byoc-aks}"
   kubectl config delete-context "$AKS_NAME" 2>/dev/null || true
   kubectl config delete-cluster "$AKS_NAME" 2>/dev/null || true
   kubectl config delete-user "clusterUser_${RG}_${AKS_NAME}" 2>/dev/null || true

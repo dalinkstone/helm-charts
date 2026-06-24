@@ -5,8 +5,8 @@
 > The chart installs the runner as a privileged Kubernetes DaemonSet that bootstraps
 > Docker + Sysbox on each node from inside the pod (via `nsenter`).
 >
-> The `install.sh`-on-VM flow documented later in this file is retained for the
-> historical bare-metal use case ONLY (single-host, no cluster, non-K8s deployments).
+> The `install.sh`-on-VM flow documented later in this file is retained for
+> historical bare-metal deployments ONLY (single-host, no cluster, non-K8s deployments).
 > It is **not** the supported path on AKS / EKS / GKE and must not be referenced
 > as the canonical install in any chart README, NOTES.txt, or values.yaml.
 
@@ -32,7 +32,7 @@ For AWS-specific values (S3, IRSA, ECR), see
 
 ## Declarative Builder Configuration (Kubernetes-native)
 
-The runner downloads declarative-builder build-context tarballs from an S3-compatible bucket. In a Customer Managed Compute (BYOC) region, the runner reads from the **same bucket** the region's snapshot-manager writes to. Set the runner's `AWS_*` values to match `services.snapshotManager.storage.s3.*`:
+The runner downloads declarative-builder build-context tarballs from an S3-compatible bucket. In a BYOC region, the runner reads from the **same bucket** the region's snapshot-manager writes to. Set the runner's `AWS_*` values to match `services.snapshotManager.storage.s3.*`:
 
 | Runner key (in `services.runner.env.*`) | Must match in `daytona-region` values                |
 |------------------------------------------|----------------------------------------------------|
@@ -74,7 +74,7 @@ services:
       AWS_ENDPOINT_URL: "https://s3.us-east-1.amazonaws.com"
 ```
 
-See [`docs/upstream-issues/runner-irsa-support.md`](../docs/upstream-issues/runner-irsa-support.md) for the upstream gap that `allowEmptyStaticKeyShim` works around.
+See [`docs/issues-summary.md`](../docs/issues-summary.md) for the upstream gap that `allowEmptyStaticKeyShim` works around.
 
 ### Verify
 

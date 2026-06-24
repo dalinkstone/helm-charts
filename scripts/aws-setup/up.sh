@@ -10,12 +10,15 @@
 #   6. installs ingress-nginx + cert-manager + Let's Encrypt ClusterIssuer
 #   7. waits for LoadBalancer hostname, prints DNS records to create
 #   8. waits for operator to confirm DNS propagation
-#   9. renders values-region.yaml.tmpl and helm-installs daytona-region
+#   9. generates SSH gateway keypairs, renders values-region.yaml.tmpl and
+#      helm-installs daytona-region
+#  10. post-registration: swaps in the region-scoped ssh-gateway api key and
+#      advertises the gateway LoadBalancer to Daytona Cloud
 #   10. prints the proxy URL for sandbox-create testing
 #
 # Idempotent: re-runnable if interrupted. State persists in .state/.
 # Operator runs against a real AWS account; this script never executes in CI.
-# See docs/byoc-overhaul/aws.md (in this repo) for the full test loop.
+# See docs/aws.md for the deployment guide.
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -27,7 +30,7 @@ source "$SCRIPT_DIR/../_lib/sku-data.sh"
 # shellcheck source=../_lib/sku-aws.sh
 source "$SCRIPT_DIR/../_lib/sku-aws.sh"
 
-omc::need_cmd aws eksctl kubectl helm envsubst yq jq
+omc::need_cmd aws eksctl kubectl helm envsubst yq jq ssh-keygen curl
 
 STATE_DIR="$(omc::state_dir "$SCRIPT_DIR")"
 PROMPTS_FILE="$STATE_DIR/prompts.env"
@@ -55,7 +58,7 @@ omc::prompt CLUSTER_NAME "Cluster name" "daytona-byoc-$(date +%Y%m%d-%H%M%S)"
 omc::prompt BASE_DOMAIN  "Public base DNS domain (e.g. byoc.example.com)"
 omc::prompt REGION_NAME  "Daytona region name" "${CLUSTER_NAME}"
 omc::prompt CLUSTER_ISSUER_EMAIL "Email for Let's Encrypt ClusterIssuer"
-omc::prompt DAYTONA_API_URL "Daytona Cloud API URL" "https://api.daytona.io"
+omc::prompt DAYTONA_API_URL "Daytona Cloud API URL" "https://app.daytona.io/api"
 omc::prompt_secret DAYTONA_API_KEY "Daytona Cloud admin API key"
 omc::prompt AWS_REGION   "AWS region" "us-east-1"
 omc::prompt S3_BUCKET    "S3 bucket name (snapshots + build context)" "${CLUSTER_NAME}-snapshots"
@@ -91,6 +94,16 @@ omc::log INFO "Using AWS instance type: $AWS_NODE_VM_SIZE"
 
 # === 2. EKS cluster ==========================================================
 omc::log INFO "=== Step 2/9: EKS cluster ==="
+# eksctl resolves the Ubuntu2404 AMI family only for k8s versions Canonical has
+# published a 24.04 image for IN THIS REGION; a hardcoded version without one
+# fails with "unable to determine AMI ... image family Ubuntu2404". Honor an
+# explicit EKS_VERSION, else auto-detect the newest EKS-supported version that
+# has a 24.04 AMI in the region.
+if [[ -z "${EKS_VERSION:-}" ]]; then
+  EKS_VERSION="$(omc::aws_eks_ubuntu2404_version "$AWS_REGION" || true)"
+  [[ -n "$EKS_VERSION" ]] || omc::die "No Canonical Ubuntu 24.04 EKS AMI found in $AWS_REGION. Set EKS_VERSION=<x.yy> and re-run. List options: aws ec2 describe-images --region $AWS_REGION --owners 099720109477 --filters 'Name=name,Values=ubuntu-eks/k8s_*/*24.04*amd64*' --query 'Images[].Name' --output text | grep -oE 'k8s_[0-9]+\\.[0-9]+' | sort -u"
+fi
+omc::log INFO "EKS version (Ubuntu 24.04 AMI available in $AWS_REGION): $EKS_VERSION"
 if eksctl get cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
   omc::log INFO "EKS cluster $CLUSTER_NAME already exists in $AWS_REGION"
 else
@@ -101,16 +114,20 @@ kind: ClusterConfig
 metadata:
   name: ${CLUSTER_NAME}
   region: ${AWS_REGION}
-  version: "1.30"
+  version: "${EKS_VERSION}"
 
 iam:
   withOIDC: true
 
 managedNodeGroups:
   - name: sandbox
-    desiredCapacity: 1
-    minSize: 1
-    maxSize: 3
+    # Minimum TWO sandbox nodes, always. Each sandbox node runs one runner, so
+    # this guarantees >= 2 runners — losing or rolling one never drops the region
+    # to zero capacity (which strands every sandbox on the dead runner). maxSize
+    # leaves headroom to add a replacement node BEFORE draining an old one.
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 4
     instanceType: ${AWS_NODE_VM_SIZE}
     amiFamily: Ubuntu2404
     labels:
@@ -154,6 +171,8 @@ cat > "$S3_POLICY" <<EOF
       "s3:PutObject",
       "s3:DeleteObject",
       "s3:ListBucket",
+      "s3:GetBucketLocation",
+      "s3:ListBucketMultipartUploads",
       "s3:AbortMultipartUpload",
       "s3:ListMultipartUploadParts"
     ],
@@ -241,7 +260,7 @@ EOF
   fi
   aws iam attach-role-policy --role-name "$IRSA_ROLE_NAME" --policy-arn "$S3_POLICY_ARN" 2>/dev/null || true
   omc::log WARN "IRSA mode: upstream runner currently hard-requires non-empty AWS_ACCESS_KEY_ID/SECRET."
-  omc::log WARN "See docs/upstream-issues/runner-irsa-support.md. For working v1 tests, use --static."
+  omc::log WARN "See docs/issues-summary.md. For working v1 tests, use --static."
 fi
 
 # === 5. kubeconfig ===========================================================
@@ -254,6 +273,25 @@ kubectl config current-context
 # packages directly. NO EXCEPTIONS — fail-fast if anything else.
 omc::verify_node_ubuntu "24.04" "daytona-sandbox-c=true" 300
 
+# === 5b2. Enforce the 2-runner minimum ======================================
+# Each sandbox node runs exactly one runner. The region must NEVER run on a
+# single runner: if that one is rolled or fails, every sandbox on it is stranded
+# (no peer to migrate to) and the whole region loses capacity. Require >= 2
+# Ready sandbox nodes before continuing.
+READY_SANDBOX_NODES="$(kubectl get nodes -l daytona-sandbox-c=true --no-headers 2>/dev/null | awk '$2=="Ready"{c++} END{print c+0}')"
+if [[ "${READY_SANDBOX_NODES:-0}" -lt 2 ]]; then
+  omc::die "Need >= 2 Ready sandbox nodes (have ${READY_SANDBOX_NODES:-0}). The region must never run on a single runner; check the 'sandbox' node group (minSize/desiredCapacity must be >= 2)."
+fi
+omc::log INFO "Ready sandbox nodes: $READY_SANDBOX_NODES (>= 2 required) — 2-runner minimum satisfied"
+
+# === 5c. CoreDNS must tolerate the sandbox taint ============================
+# The only node pool is tainted sandbox=true:NoSchedule. CoreDNS (kube-system
+# Deployment) won't schedule without tolerating it, leaving the cluster with no
+# DNS — so in-cluster calls (region registration -> app.daytona.io) fail to
+# resolve. Patch it before installing anything that needs DNS.
+omc::log INFO "=== Step 5c: CoreDNS sandbox-taint toleration ==="
+omc::coredns_tolerate_taint sandbox true NoSchedule
+
 # === 6. Namespace ============================================================
 omc::log INFO "=== Step 6/9: daytona namespace ==="
 kubectl create namespace daytona --dry-run=client -o yaml | kubectl apply -f -
@@ -262,23 +300,53 @@ kubectl create namespace daytona --dry-run=client -o yaml | kubectl apply -f -
 omc::log INFO "=== Step 7/9: ingress-nginx + cert-manager ==="
 omc::ingress_nginx_install
 omc::cert_manager_install
-omc::cluster_issuer_apply "$CLUSTER_ISSUER_EMAIL"
+# Wildcard SANs (*.proxy.<domain>) for per-sandbox preview certs can only be
+# issued via DNS-01. If a Cloudflare API token is supplied, use the DNS-01
+# issuer and enable the wildcard SAN; otherwise install the HTTP-01 issuer and
+# keep the proxy cert NON-wildcard so it actually issues (Let's Encrypt cannot
+# satisfy a wildcard over HTTP-01). See docs/troubleshooting.md.
+if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  omc::cluster_issuer_apply_cf_dns01 "$CLUSTER_ISSUER_EMAIL" "$CLOUDFLARE_API_TOKEN"
+  PROXY_WILDCARD_TLS=true
+else
+  omc::cluster_issuer_apply "$CLUSTER_ISSUER_EMAIL"
+  PROXY_WILDCARD_TLS=false
+fi
+export PROXY_WILDCARD_TLS
 
 # === 8. Wait for LoadBalancer + DNS records ==================================
 omc::log INFO "=== Step 8/9: Wait for LoadBalancer + DNS ==="
 LB_TARGET="$(omc::wait_lb_address ingress-nginx ingress-nginx-controller 300)"
 omc::log INFO "LoadBalancer target: $LB_TARGET"
-omc::print_dns_records "$BASE_DOMAIN" "$LB_TARGET"
-omc::confirm "Have you created the DNS records above and waited for propagation?" \
-  || omc::die "Aborted by operator. Re-run after creating DNS records."
+if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  # Cloudflare token present -> create the routing records programmatically
+  # (proxy / *.proxy / snapshots -> the NLB) instead of asking the operator to
+  # do it by hand, so the whole run is unattended.
+  omc::cloudflare_region_dns "$CLOUDFLARE_API_TOKEN" "$BASE_DOMAIN" "$LB_TARGET"
+  omc::log INFO "Waiting 45s for DNS to propagate before continuing..."
+  sleep 45
+else
+  omc::print_dns_records "$BASE_DOMAIN" "$LB_TARGET"
+  omc::confirm "Have you created the DNS records above and waited for propagation?" \
+    || omc::die "Aborted by operator. Re-run after creating DNS records."
+fi
 
-# === 9. Render values + helm install =========================================
-omc::log INFO "=== Step 9/9: helm install daytona-region ==="
+# === 9. SSH keys + render values + helm install ==============================
+omc::log INFO "=== Step 9/10: helm install daytona-region ==="
+omc::ssh_keys_ensure "$STATE_DIR"
 export CLUSTER_NAME BASE_DOMAIN REGION_NAME DAYTONA_API_URL DAYTONA_API_KEY \
        AWS_REGION S3_BUCKET RUNNER_AWS_CREDENTIAL_MODE RUNNER_IMAGE_TAG \
        IAM_ACCESS_KEY IAM_SECRET_KEY IRSA_ROLE_ARN INTERNAL_REGISTRY_HOST=""
 omc::render_template "$SCRIPT_DIR/values-region.yaml.tmpl" "$VALUES_OUT"
 omc::helm_install_wait daytona-region "$SCRIPT_DIR/../../charts/daytona-region" daytona "$VALUES_OUT"
+
+# === 10. Region-scoped ssh-gateway key + sshGatewayUrl =======================
+# Cannot happen earlier: the key only exists after the registration hook has
+# created the region during helm install.
+omc::log INFO "=== Step 10/10: finalize ssh-gateway (region-scoped key) ==="
+omc::region_sshgateway_finalize daytona daytona-region \
+  "$SCRIPT_DIR/../../charts/daytona-region" "$VALUES_OUT" \
+  "$DAYTONA_API_URL" "$DAYTONA_API_KEY"
 
 # === Summary =================================================================
 cat >&2 <<EOF
@@ -290,9 +358,14 @@ Snapshot manager:  https://snapshots.${BASE_DOMAIN}
 Next steps:
   1. Open the Daytona Cloud dashboard for ${REGION_NAME}
   2. Verify the runner is registered: kubectl -n daytona get pods
-  3. Create a sandbox via the web UI to validate end-to-end
+  3. Create a snapshot in this region, then a sandbox from it (web UI or API)
   4. Run the SDK smoke test:    bash $SCRIPT_DIR/e2e.sh
   5. Teardown when done:         bash $SCRIPT_DIR/teardown.sh
+
+Future manual upgrades MUST pass both values files or SSH breaks:
+  helm upgrade daytona-region charts/daytona-region -n daytona \\
+    -f $VALUES_OUT \\
+    -f $STATE_DIR/values-sshgateway-key.yaml
 
 State persisted in: $STATE_DIR
 ===========================================================

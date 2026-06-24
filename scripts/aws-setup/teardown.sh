@@ -3,13 +3,13 @@
 # Pairs with up.sh. Idempotent. Continues on error to keep cleaning.
 #
 # Reverse-create order:
-#   1. helm uninstall daytona-region
-#   2. kubectl delete ns daytona (deletes runner, snapshot-manager, proxy, etc.)
-#   3. eksctl delete cluster (also removes NLB, VPC if eksctl created them)
-#   4. aws s3 rb --force on the bucket
-#   5. detach + delete IAM policy
-#   6. delete IAM user keys + user (static mode) OR delete IRSA role (irsa mode)
-#   7. cleanup local .state/
+#   1.  helm uninstall daytona-region + delete ns daytona
+#   1b. release Service type=LoadBalancer ELBs so the VPC delete doesn't hang
+#   2.  eksctl delete cluster (VPC, nodegroup, cluster IAM roles)
+#   3.  aws s3 rb --force on the bucket
+#   4.  detach + delete IAM policy; delete IAM user/keys (static) or IRSA role
+#   5.  delete the IAM OIDC provider (eksctl leaves it behind)
+#   6.  cleanup local .state/ + kubeconfig
 set -uo pipefail
 IFS=$'\n\t'
 
@@ -56,6 +56,24 @@ if kubectl get ns daytona >/dev/null 2>&1; then
   kubectl delete namespace daytona --wait=false 2>/dev/null \
     && omc::log INFO "namespace daytona deletion initiated" \
     || omc::log WARN "namespace daytona delete failed or absent"
+fi
+
+# === 1b. Release cloud load balancers BEFORE deleting the VPC ================
+# Service type=LoadBalancer (ingress-nginx-controller, ssh-gateway) provisions
+# ELBs whose ENIs + security groups pin the VPC. If they outlive the helm
+# uninstall, eksctl's VPC delete hangs. Delete them explicitly and wait so AWS
+# releases the ELBs first. Also capture the IAM OIDC provider id while the
+# cluster still exists (eksctl delete does NOT remove it -> leak otherwise).
+OIDC_ISSUER="$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
+  --query 'cluster.identity.oidc.issuer' --output text 2>/dev/null || true)"
+if kubectl cluster-info >/dev/null 2>&1; then
+  while IFS= read -r lb_line; do
+    [[ -z "$lb_line" ]] && continue
+    lb_ns="${lb_line%%/*}"; lb_name="${lb_line##*/}"
+    kubectl delete svc "$lb_name" -n "$lb_ns" --wait=true --timeout=3m 2>/dev/null \
+      && omc::log INFO "released LoadBalancer svc $lb_line" || true
+  done < <(kubectl get svc -A \
+      -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null)
 fi
 
 # === 2. eksctl delete cluster ================================================
@@ -118,6 +136,18 @@ if [[ -n "$ACCOUNT_ID" ]]; then
     aws iam delete-policy --policy-arn "$S3_POLICY_ARN" \
       && omc::log INFO "IAM policy $S3_POLICY_NAME deleted" \
       || omc::log WARN "IAM policy delete failed (still attached somewhere?)"
+  fi
+
+  # IAM OIDC provider (created by eksctl `withOIDC`; NOT removed by cluster delete)
+  if [[ -n "${OIDC_ISSUER:-}" && "$OIDC_ISSUER" != "None" ]]; then
+    OIDC_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_ISSUER#https://}"
+    if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN" >/dev/null 2>&1; then
+      aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN" \
+        && omc::log INFO "IAM OIDC provider deleted" \
+        || omc::log WARN "OIDC provider delete failed"
+    else
+      omc::log INFO "IAM OIDC provider already gone"
+    fi
   fi
 fi
 

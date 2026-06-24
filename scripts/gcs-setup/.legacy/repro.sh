@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC (Customer Managed Compute) on GCP — end-to-end reproducer
+# Daytona BYOC on GCP — end-to-end setup
 # =============================================================================
 #
-# Walks through the FULL customer journey for deploying Daytona BYOC on GCP:
+# Walks through the FULL deployment of Daytona BYOC on GCP:
 #
 #   Phase 1-4: preflight (tools, gcloud auth, Daytona key, Cloudflare token)
 #   Phase 5-6: GCS bucket + dedicated service account + HMAC keys
@@ -17,13 +17,13 @@
 #                fetches HMAC + token from Secret Manager on the box)
 #   Phase 15: SDK validation — create a sandbox targeting the new region
 #
-# The customer keeps using Daytona Cloud (app.daytona.io) as the CONTROL PLANE.
-# Their GKE cluster hosts the region INFRASTRUCTURE (proxy + snapshot manager).
-# Their GCE instances are the COMPUTE (run the sandboxes themselves).
+# You keep using Daytona Cloud (app.daytona.io) as the CONTROL PLANE.
+# Your GKE cluster hosts the region INFRASTRUCTURE (proxy + snapshot manager).
+# Your GCE instances are the COMPUTE (run the sandboxes themselves).
 #
 # Required env vars:
 #   DAYTONA_API_KEY      - personal API key from app.daytona.io/dashboard/keys
-#   DOMAIN               - FQDN you own, e.g. cmc.yourdomain.com. Used for
+#   DOMAIN               - FQDN you own, e.g. byoc.yourdomain.com. Used for
 #                          proxy.${DOMAIN} and snapshots.${DOMAIN}.
 #   ACME_EMAIL           - email for Let's Encrypt registration
 #   CLOUDFLARE_API_TOKEN - Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)
@@ -39,7 +39,7 @@
 #   DAYTONA_API_URL          https://app.daytona.io/api
 #   GCP_REGION               us-central1
 #   GCP_ZONE                 us-central1-a    (where runner VMs live)
-#   CLUSTER_NAME             daytona-cmc-gke (suffixed with stable hash of DOMAIN)
+#   CLUSTER_NAME             daytona-byoc-gke (suffixed with stable hash of DOMAIN)
 #   K8S_VERSION              ""                (let GCP pick the default channel)
 #   NODE_MACHINE_TYPE        e2-standard-4    (for GKE control-plane pods)
 #   NODE_COUNT               2                 (GKE node count)
@@ -48,7 +48,7 @@
 #                                                × 2x over-prov sizing)
 #   RUNNER_MACHINE_TYPE      n2-standard-8    (set to skip the interactive picker)
 #   RUNNER_DISK_GB           100
-#   REGION_NAME              gke-cmc-<timestamp>    (auto)
+#   REGION_NAME              gke-byoc-<timestamp>    (auto)
 #   RUNNER_NAME_PREFIX       gke-runner             (each instance gets a numeric suffix)
 #   STAGING                  false                  (LE staging vs prod CA)
 #   PHASE                    5                      (1..5 — stop after this phase)
@@ -161,7 +161,7 @@ GCP_ZONE="${GCP_ZONE:-}"
 # Stable cluster name suffix derived from $DOMAIN so re-runs hit the same
 # cluster. Keeps the cluster name <40 chars (GKE limit is 40 incl. region).
 _hash="$(printf '%s' "$DOMAIN" | shasum | cut -c1-6)"
-CLUSTER_NAME="${CLUSTER_NAME:-daytona-cmc-gke-$_hash}"
+CLUSTER_NAME="${CLUSTER_NAME:-daytona-byoc-gke-$_hash}"
 K8S_VERSION="${K8S_VERSION:-}"
 NODE_MACHINE_TYPE="${NODE_MACHINE_TYPE:-e2-standard-4}"
 NODE_COUNT="${NODE_COUNT:-2}"
@@ -171,7 +171,7 @@ RUNNER_DISK_GB="${RUNNER_DISK_GB:-100}"
 
 NAMESPACE="${NAMESPACE:-daytona-region}"
 RELEASE="${RELEASE:-daytona-region}"
-CHART_PATH="${CHART_PATH:-$HOME/main/fork/helm-charts/charts/daytona-region}"
+CHART_PATH="${CHART_PATH:-$SCRIPT_DIR/../../../charts/daytona-region}"
 STAGING="${STAGING:-false}"
 SKIP_E2E="${SKIP_E2E:-false}"
 PHASE="${PHASE:-5}"
@@ -357,11 +357,11 @@ fi
 # Decides which REGION_NAME to use. Three sources of truth, in priority order:
 #
 #   1. State file: $STATE_DIR/names.env has REGION_NAME that ALSO exists in
-#      Daytona Cloud as a CMC-managed region. Reuse silently. This is the
+#      Daytona Cloud as a BYOC-managed region. Reuse silently. This is the
 #      typical re-run case.
 #
 #   2. Interactive picker: $STATE_DIR/names.env is missing or stale.
-#      Query /api/regions, filter to ones with the 'gke-cmc-' prefix, and
+#      Query /api/regions, filter to ones with the 'gke-byoc-' prefix, and
 #      offer the user a menu to either reuse one or create a new region.
 #
 #   3. Fallback (NON_INTERACTIVE=true and no state): auto-create a fresh
@@ -374,12 +374,12 @@ fi
 log "phase 4.7/15 — Daytona Cloud region selection"
 
 all_regions_json="$(curl -sS -H "Authorization: Bearer $DAYTONA_API_KEY" "$DAYTONA_API_URL/regions" 2>/dev/null || echo '[]')"
-cmc_regions_json="$(echo "$all_regions_json" | jq -c '[.[]? | select((.name // "") | startswith("gke-cmc-"))]')"
-cmc_count="$(echo "$cmc_regions_json" | jq 'length')"
+byoc_regions_json="$(echo "$all_regions_json" | jq -c '[.[]? | select((.name // "") | startswith("gke-byoc-"))]')"
+byoc_count="$(echo "$byoc_regions_json" | jq 'length')"
 
 # Source 1: state has REGION_NAME, verify it still exists in Daytona Cloud
 if [[ -n "$REGION_NAME" ]]; then
-  match_id="$(echo "$cmc_regions_json" | jq -r --arg n "$REGION_NAME" '.[]? | select(.name == $n) | .id // empty' | head -1)"
+  match_id="$(echo "$byoc_regions_json" | jq -r --arg n "$REGION_NAME" '.[]? | select(.name == $n) | .id // empty' | head -1)"
   if [[ -n "$match_id" ]]; then
     REGION_ID="$match_id"
     PICKED_EXISTING_REGION="true"
@@ -394,45 +394,45 @@ fi
 # Source 2: interactive picker
 if [[ -z "$REGION_NAME" && "$NON_INTERACTIVE" != "true" ]]; then
   echo
-  echo "  Daytona Cloud regions matching 'gke-cmc-*' prefix:"
-  if (( cmc_count == 0 )); then
+  echo "  Daytona Cloud regions matching 'gke-byoc-*' prefix:"
+  if (( byoc_count == 0 )); then
     echo "    (none — only option is to create a new region)"
   else
-    for i in $(seq 0 $((cmc_count - 1))); do
-      r_name="$(echo "$cmc_regions_json"  | jq -r ".[$i].name")"
-      r_id="$(echo   "$cmc_regions_json"  | jq -r ".[$i].id")"
-      r_proxy="$(echo "$cmc_regions_json" | jq -r ".[$i].proxyUrl // \"\"")"
+    for i in $(seq 0 $((byoc_count - 1))); do
+      r_name="$(echo "$byoc_regions_json"  | jq -r ".[$i].name")"
+      r_id="$(echo   "$byoc_regions_json"  | jq -r ".[$i].id")"
+      r_proxy="$(echo "$byoc_regions_json" | jq -r ".[$i].proxyUrl // \"\"")"
       printf '    %d  %-32s  id=%s\n' "$((i+1))" "$r_name" "$r_id"
       [[ -n "$r_proxy" ]] && printf '       proxy: %s\n' "$r_proxy"
     done
   fi
-  printf '    %d  [Create a new region]\n' "$((cmc_count + 1))"
-  if (( cmc_count > 0 )); then
-    printf '    %d  [DELETE all the above + create new] — destructive, no confirm\n' "$((cmc_count + 2))"
+  printf '    %d  [Create a new region]\n' "$((byoc_count + 1))"
+  if (( byoc_count > 0 )); then
+    printf '    %d  [DELETE all the above + create new] — destructive, no confirm\n' "$((byoc_count + 2))"
   fi
   echo
-  default_choice=$((cmc_count + 1))
-  read -r -p "  Choice (1-$((cmc_count + 1 + ( cmc_count > 0 ? 1 : 0 ) )), default=$default_choice = create new): " ans
+  default_choice=$((byoc_count + 1))
+  read -r -p "  Choice (1-$((byoc_count + 1 + ( byoc_count > 0 ? 1 : 0 ) )), default=$default_choice = create new): " ans
   ans="${ans:-$default_choice}"
 
-  if (( ans >= 1 && ans <= cmc_count )); then
+  if (( ans >= 1 && ans <= byoc_count )); then
     # Pick existing
-    REGION_NAME="$(echo "$cmc_regions_json" | jq -r ".[$((ans-1))].name")"
-    REGION_ID="$(echo   "$cmc_regions_json" | jq -r ".[$((ans-1))].id")"
+    REGION_NAME="$(echo "$byoc_regions_json" | jq -r ".[$((ans-1))].name")"
+    REGION_ID="$(echo   "$byoc_regions_json" | jq -r ".[$((ans-1))].id")"
     PICKED_EXISTING_REGION="true"
     ok "  picked existing region: $REGION_NAME ($REGION_ID)"
-  elif (( ans == cmc_count + 1 )); then
+  elif (( ans == byoc_count + 1 )); then
     # Create new
-    REGION_NAME="gke-cmc-$(date +%s)"
+    REGION_NAME="gke-byoc-$(date +%s)"
     REGION_ID=""
     PICKED_EXISTING_REGION="false"
     ok "  will create a new region: $REGION_NAME"
-  elif (( cmc_count > 0 && ans == cmc_count + 2 )); then
+  elif (( byoc_count > 0 && ans == byoc_count + 2 )); then
     # Nuke all existing + create new
-    log "  deleting $cmc_count existing CMC-managed region(s) from Daytona Cloud..."
-    for i in $(seq 0 $((cmc_count - 1))); do
-      del_id="$(echo "$cmc_regions_json" | jq -r ".[$i].id")"
-      del_name="$(echo "$cmc_regions_json" | jq -r ".[$i].name")"
+    log "  deleting $byoc_count existing BYOC-managed region(s) from Daytona Cloud..."
+    for i in $(seq 0 $((byoc_count - 1))); do
+      del_id="$(echo "$byoc_regions_json" | jq -r ".[$i].id")"
+      del_name="$(echo "$byoc_regions_json" | jq -r ".[$i].name")"
       http="$(curl -sS -o /dev/null -w '%{http_code}' \
         -X DELETE -H "Authorization: Bearer $DAYTONA_API_KEY" \
         "$DAYTONA_API_URL/regions/$del_id" 2>/dev/null || echo 000)"
@@ -441,7 +441,7 @@ if [[ -z "$REGION_NAME" && "$NON_INTERACTIVE" != "true" ]]; then
         *)           warn "    delete returned HTTP $http for $del_name ($del_id) — region may have attached runners; cleanup at app.daytona.io/dashboard/regions" ;;
       esac
     done
-    REGION_NAME="gke-cmc-$(date +%s)"
+    REGION_NAME="gke-byoc-$(date +%s)"
     REGION_ID=""
     PICKED_EXISTING_REGION="false"
     ok "  will create a new region: $REGION_NAME"
@@ -452,7 +452,7 @@ fi
 
 # Source 3: non-interactive fallback
 if [[ -z "$REGION_NAME" ]]; then
-  REGION_NAME="gke-cmc-$(date +%s)"
+  REGION_NAME="gke-byoc-$(date +%s)"
   REGION_ID=""
   PICKED_EXISTING_REGION="false"
   ok "  non-interactive, no state → creating new region: $REGION_NAME"

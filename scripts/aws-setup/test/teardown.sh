@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC reproducer (AWS) - teardown
+# Daytona BYOC setup (AWS) - teardown
 # =============================================================================
 # Cleans up in the right order:
 #   1. Delete the runners from Daytona Cloud
@@ -56,7 +56,7 @@ RUNNER_NAMES=()
 RUNNER_SG=""
 IAM_ACCESS_KEY=""
 IAM_SECRET_KEY=""
-# ECR (Q1 verification) state — set if ecr-setup.sh ran
+# ECR (private-registry verification) state — set if ecr-setup.sh ran
 ECR_PULLER_ROLE_NAME=""
 ECR_CACHE_PREFIX=""
 DAYTONA_REGISTRY_ID=""
@@ -72,12 +72,12 @@ DAYTONA_REGISTRY_ENDPOINT=""
 if [[ -z "$REGION_NAME" ]]; then
   if [[ -n "$DOMAIN" ]]; then
     _hash="$(printf '%s' "$DOMAIN" | shasum | cut -c1-6)"
-    CLUSTER_NAME="${CLUSTER_NAME:-daytona-cmc-aws-$_hash}"
+    CLUSTER_NAME="${CLUSTER_NAME:-daytona-byoc-aws-$_hash}"
   fi
   warn "no state — won't be able to clean up Daytona Cloud region/runner records"
 else
   _hash="$(printf '%s' "$DOMAIN" | shasum | cut -c1-6)"
-  CLUSTER_NAME="${CLUSTER_NAME:-daytona-cmc-aws-$_hash}"
+  CLUSTER_NAME="${CLUSTER_NAME:-daytona-byoc-aws-$_hash}"
   S3_BUCKET="${S3_BUCKET:-${REGION_NAME}-snapshots}"
   S3_BUCKET="$(printf '%s' "$S3_BUCKET" | tr '[:upper:]' '[:lower:]' | cut -c1-63)"
   IAM_USER_NAME="${IAM_USER_NAME:-${REGION_NAME}-s3}"
@@ -308,7 +308,7 @@ if [[ -n "${IAM_USER_NAME:-}" ]] && aws iam get-user --user-name "$IAM_USER_NAME
     && ok "IAM user deleted" || warn "IAM user delete failed"
 fi
 
-# ---- 8b. ECR (Q1 verification) cleanup ----
+# ---- 8b. ECR (private-registry verification) cleanup ----
 # Only runs if ecr-setup.sh produced .state/ecr.env.
 if [[ -n "${DAYTONA_REGISTRY_ID:-}" && -n "${DAYTONA_REGISTRY_ENDPOINT:-}" && -n "$DAYTONA_API_KEY" ]]; then
   log "deleting Daytona ECR registry registration $DAYTONA_REGISTRY_ID"

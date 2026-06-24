@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC reproducer (AWS) — ECR private-registry verification setup
+# Daytona BYOC setup (AWS) — ECR private-registry verification setup
 # =============================================================================
 #
-# Sets up everything needed to verify customer Question 1:
-#   "Creating a snapshot from our private AWS ECR image fails because the
-#    runner's registry inspect job does not authenticate to ECR."
+# Sets up everything needed to verify the private-registry (ECR) path:
+#   a snapshot created from a private AWS ECR image requires the runner's
+#   registry inspect job to authenticate to ECR via the broker flow.
 #
 # We provision:
 #   1. An ECR pull-through cache rule for public.ecr.aws (lets us reference a
@@ -73,7 +73,7 @@ ECR_CACHE_PREFIX="ecr-public"
 ECR_TEST_IMAGE="${ECR_REGISTRY_URL}/${ECR_CACHE_PREFIX}/docker/library/alpine:3.21"
 ECR_PULLER_ROLE_NAME="$(printf '%s' "${REGION_NAME}-ecr-puller" | cut -c1-64)"
 
-log "ECR setup for Q1 verification"
+log "ECR private-registry setup"
 ok "  AWS account:   $AWS_ACCOUNT_ID"
 ok "  ECR registry:  $ECR_REGISTRY_URL"
 ok "  test image:    $ECR_TEST_IMAGE"

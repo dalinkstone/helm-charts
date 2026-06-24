@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC reproducer - end-to-end SDK validation
+# Daytona BYOC — end-to-end SDK validation
 # =============================================================================
 # Drives the Daytona Python SDK against Daytona Cloud, asking it to create a
-# sandbox specifically in our custom region (`target=$REGION_NAME`). If the
-# region + runner are wired up correctly, the sandbox lands on our Azure VM
+# sandbox specifically in your custom region (`target=$REGION_NAME`). If the
+# region + runner are wired up correctly, the sandbox lands on your Azure VM
 # and `print("Hello World from BYOC")` runs there.
 #
 # Required env (set by repro.sh):
@@ -15,6 +15,12 @@
 # =============================================================================
 
 set -uo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+STATE_DIR="${STATE_DIR:-$SCRIPT_DIR/.state}"
+# Pick up cluster identity + API creds saved by up.sh (.state/prompts.env) so
+# the operator can run `bash e2e.sh` right after up.sh without re-exporting.
+[[ -f "$STATE_DIR/prompts.env" ]] && { set -a; . "$STATE_DIR/prompts.env"; set +a; }
 
 DAYTONA_API_URL="${DAYTONA_API_URL:?required}"
 DAYTONA_API_KEY="${DAYTONA_API_KEY:?required}"
@@ -32,7 +38,7 @@ python3 -c "import daytona" 2>/dev/null || {
 
 # Build the test script. Has to be a separate python file so we can apply the
 # urllib3 monkey-patch before importing daytona.
-cat > /tmp/cmc-e2e.py <<PYEOF
+cat > /tmp/byoc-e2e.py <<PYEOF
 import os, sys, ssl
 
 if os.environ.get("STAGING", "false") == "true":
@@ -75,4 +81,4 @@ DAYTONA_API_URL="$DAYTONA_API_URL" \
 DAYTONA_API_KEY="$DAYTONA_API_KEY" \
 REGION_NAME="$REGION_NAME" \
 STAGING="$STAGING" \
-  python3 /tmp/cmc-e2e.py
+  python3 /tmp/byoc-e2e.py

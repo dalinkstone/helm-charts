@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario S5 gate: shellcheck the cherry-picked setup scripts under scripts/{aws,azure,gcs}-setup/.
+# Gate: shellcheck the setup scripts under scripts/{aws,azure,gcs}-setup/.
 # Allowlist info-level findings (SC1091 source paths, SC2034 unused outer vars used by sourced files,
 # SC2015 A&&B||C style) because the scripts are operator-side IaC repros, not chart-published surfaces.
 # Hard-fail on warning, error, fatal severities.
@@ -30,7 +30,7 @@ lint_scripts_in_dir() {
         EXIT_NONZERO_SCRIPTS+=("$script")
         FAIL=1
       else
-        echo "  ^^ legacy script: warnings tolerated (file slated for removal in Prompt 2)"
+        echo "  ^^ legacy script: warnings tolerated (file slated for removal)"
       fi
     fi
   done
@@ -40,7 +40,7 @@ if [[ -d "scripts/_lib" ]]; then
   lint_scripts_in_dir "scripts/_lib" true
 fi
 
-for dir in scripts/aws-setup scripts/azure-setup scripts/gcs-setup scripts/azure-oss-setup; do
+for dir in scripts/aws-setup scripts/azure-setup scripts/gcs-setup; do
   if [[ ! -d "$dir" ]]; then
     echo "MISSING setup dir: $dir"
     FAIL=1
@@ -53,7 +53,7 @@ for dir in scripts/aws-setup scripts/azure-setup scripts/gcs-setup scripts/azure
 done
 
 if [[ $FAIL -eq 0 ]]; then
-  echo "OK: shellcheck warning-level clean for scripts/_lib/ + scripts/{aws,azure,gcs,azure-oss}-setup/*.sh (legacy tolerated)"
+  echo "OK: shellcheck warning-level clean for scripts/_lib/ + scripts/{aws,azure,gcs}-setup/*.sh (legacy tolerated)"
 else
   echo "FAILED: ${#EXIT_NONZERO_SCRIPTS[@]} script(s) had warning-level findings"
   for s in "${EXIT_NONZERO_SCRIPTS[@]}"; do echo "  $s"; done

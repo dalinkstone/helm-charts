@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Daytona BYOC reproducer (AWS) — end-to-end SDK validation
+# Daytona BYOC setup (AWS) — end-to-end SDK validation
 # =============================================================================
-# Tests THREE distinct paths in the BYOC region and produces a customer-
-# question verification receipt at the end.
+# Tests THREE distinct paths in the BYOC region and prints a verification
+# summary at the end. Each stage notes what it tests and why.
 #
 #   STAGE A — PUBLIC IMAGE PATH (registry pull, no build context)
 #     Image.base('alpine:3.21')  →  sandbox from a small public image.
@@ -15,7 +15,7 @@
 #     What this DOES NOT prove: that S3 is correctly wired on both ends, and
 #     does NOT exercise the private-registry auth flow.
 #
-#   STAGE B — DECLARATIVE BUILDER PATH  (Customer Question 2)
+#   STAGE B — DECLARATIVE BUILDER PATH  (S3 wiring)
 #     Image.debian_slim('3.12').pip_install(...)  →  builds an image,
 #     creates a snapshot, then a sandbox from it.
 #     What this proves: the SDK can upload build context to the
@@ -26,7 +26,7 @@
 #     count before/after so the receipt at the end shows hard evidence
 #     that S3 was actually touched.
 #
-#   STAGE C — PRIVATE ECR PATH  (Customer Question 1)
+#   STAGE C — PRIVATE ECR PATH  (private-registry auth)
 #     Image.base('<account>.dkr.ecr.<region>.amazonaws.com/...')
 #     → snapshot from a private ECR image. The runner's
 #       INSPECT_SNAPSHOT_IN_REGISTRY job must authenticate to ECR via the
@@ -106,7 +106,7 @@ python3 -c "import daytona" 2>/dev/null || {
 
 # Self-contained python file so we can apply the urllib3 monkey-patch (for LE
 # staging certs) BEFORE importing the daytona SDK.
-cat > /tmp/cmc-aws-e2e.py <<'PYEOF'
+cat > /tmp/byoc-aws-e2e.py <<'PYEOF'
 import os
 import sys
 import ssl
@@ -181,7 +181,7 @@ config = DaytonaConfig(api_key=api_key, api_url=api_url, target=region)
 client = Daytona(config)
 
 # evidence: structured detail attached to each stage's result so the
-# verification receipt can quote it back to a reader/customer.
+# verification summary can quote it back to a reader.
 results = {
     "A": {"status": None, "evidence": None},
     "B": {"status": None, "evidence": None},
@@ -270,7 +270,7 @@ elif Image is None or CreateSandboxFromImageParams is None:
     print("  → upgrade the SDK to test the declarative builder: pip install -U daytona")
     results["B"]["status"] = "skipped"
 else:
-    banner("B", "DECLARATIVE BUILDER PATH — Customer Question 2 (S3 wiring)")
+    banner("B", "DECLARATIVE BUILDER PATH (S3 wiring)")
     info("Proves both halves of S3 are wired correctly:")
     info("  • SDK upload of build context → snapshot-manager S3 creds")
     info("  • Runner download of that context → runner AWS_* env vars")
@@ -355,8 +355,8 @@ else:
     except Exception as e:
         fail(f"stage B raised: {e!r}")
         info("If the error message mentions S3, AccessDenied, NoSuchKey, or")
-        info("a 403/404 against a bucket, that's the original pain point —")
-        info("the runner is missing AWS_* env vars or pointing at the wrong bucket.")
+        info("a 403/404 against a bucket, the runner is missing AWS_* env vars")
+        info("or is pointing at the wrong bucket.")
         info("Check each runner with:")
         info("  aws ssm start-session --target <instance-id>")
         info("  sudo grep -E '^Environment=AWS_' /etc/systemd/system/daytona-runner.service")
@@ -377,14 +377,14 @@ elif not ecr_image:
     print("  → run `bash ecr-setup.sh` first to provision the ECR repo + IAM role + registry")
     results["C"]["status"] = "skipped"
 else:
-    banner("C", "PRIVATE ECR PATH — Customer Question 1 (registry auth)")
+    banner("C", "PRIVATE ECR PATH (registry auth)")
     info("Proves Daytona's broker → AssumeRole → ECR-token flow works:")
     info(f"  • Image lives in private ECR:  {ecr_image}")
     info(f"  • IAM role assumed by broker:  {ecr_role_arn}")
     info(f"  • Daytona registry id:         {ecr_reg_id or '(none — fell back to public pull or manual reg)'}")
     info("")
     info("If this stage FAILS with 'no basic auth credentials' or similar,")
-    info("you're seeing the exact customer reproduction. Check:")
+    info("you're seeing the exact failure this reproduces. Check:")
     info("  1. Is the registry registered in Daytona? GET /api/docker-registries")
     info("  2. Does the role trust the right broker ARN?")
     info("  3. Does the trust policy's ExternalId == your organization ID?")
@@ -402,7 +402,7 @@ else:
         ok(f"sandbox created in {dt:.1f}s  id={sandbox_c.id}  state={sandbox_c.state}")
         info("    ← reaching STARTED means the runner INSPECTED + PULLED the")
         info("      private ECR image. That only succeeds if Daytona's broker")
-        info("      AssumeRole'd into our puller role, called")
+        info("      AssumeRole'd into the puller role, called")
         info("      ecr:GetAuthorizationToken, and passed the token to the runner.")
 
         info("running `echo` inside the sandbox to confirm it's responsive ...")
@@ -425,7 +425,7 @@ else:
         err_str = str(e)
         fail(f"stage C raised: {e!r}")
         if "no basic auth" in err_str.lower() or "unauthorized" in err_str.lower():
-            info("    ↑ THIS is the customer's exact reported failure.")
+            info("    ↑ THIS is the registry-auth failure this stage checks for.")
             info("    The runner cannot authenticate to ECR via the broker flow.")
         info("Recovery checklist:")
         info("  - Is the ECR registry registered in Daytona Cloud?")
@@ -450,19 +450,16 @@ print()
 
 
 # ---------------------------------------------------------------- RECEIPT
-# This block is the customer-facing artifact. It states, for each of the
-# customer's two original questions, exactly what was tested and what the
-# evidence is. The intent is that this can be quoted verbatim back to a
-# customer support ticket.
+# Verification summary: for each path, what was tested and the evidence.
 print("═" * 70)
-print("  CUSTOMER QUESTION VERIFICATION RECEIPT")
+print("  VERIFICATION SUMMARY")
 print("═" * 70)
 
-# Q1: ECR registry auth
+# Private ECR pull
 print()
-print("  Q1: \"Creating a snapshot from our private AWS ECR image fails")
-print("       because the runner's registry inspect job does not")
-print("       authenticate to ECR.\"")
+print("  Private ECR pull — validates that a snapshot can be created from a")
+print("  private AWS ECR image: the runner's registry inspect job authenticates")
+print("  to ECR via the broker → AssumeRole → ECR-token flow.")
 c = results["C"]
 print(f"      Test:       Stage C (private ECR pull)")
 if c["status"] == "pass":
@@ -479,29 +476,28 @@ if c["status"] == "pass":
     print(f"                  flow works end-to-end when the ECR registry is")
     print(f"                  registered in Daytona with a properly-configured")
     print(f"                  IAM role (trust policy → broker + ExternalId,")
-    print(f"                  permissions → 4 ECR actions). The customer's")
-    print(f"                  symptom indicates a configuration gap on their")
-    print(f"                  side — most likely missing registry registration,")
-    print(f"                  wrong broker ARN in trust policy, or wrong")
-    print(f"                  ExternalId. See charts/daytona-region/README.md")
+    print(f"                  permissions → 4 ECR actions). A failure here usually")
+    print(f"                  means a configuration gap on the operator side —")
+    print(f"                  missing registry registration, wrong broker ARN in")
+    print(f"                  the trust policy, or wrong ExternalId. See")
+    print(f"                  charts/daytona-region/README.md")
     print(f"                  '#private-registry-authentication-ecr'.")
 elif c["status"] == "fail" or c["status"] == "error":
     print(f"      Result:     NOT VERIFIED (Stage C {c['status'].upper()})")
     print(f"      Evidence:   {c['evidence']}")
     print(f"      Conclusion: We were unable to drive an ECR pull end-to-end.")
-    print(f"                  Likely cause matches the customer report —")
-    print(f"                  inspect the failure above.")
+    print(f"                  Likely a configuration gap — inspect the failure above.")
 else:
     print(f"      Result:     NOT TESTED (Stage C {c['status']})")
     print(f"      Evidence:   None — Stage C was skipped (likely no ecr-setup).")
     print(f"      Conclusion: Run `bash ecr-setup.sh` then re-run e2e.sh to")
-    print(f"                  produce live evidence for Q1.")
+    print(f"                  produce live evidence for the private ECR path.")
 
-# Q2: Declarative builder S3
+# Declarative builder / S3 wiring
 print()
-print("  Q2: \"Creating a snapshot through Daytona's declarative image")
-print("       builder fails because the runner is missing object")
-print("       storage/S3 configuration.\"")
+print("  Declarative builder / S3 — validates that the declarative image")
+print("  builder uploads build context to S3 and the runner reads it back")
+print("  with its own credentials.")
 b = results["B"]
 print(f"      Test:       Stage B (declarative builder)")
 if b["status"] == "pass":
@@ -538,11 +534,9 @@ if b["status"] == "pass":
     print(f"                    • runner (EC2 systemd) read those blobs from")
     print(f"                      the same bucket via its AWS_* env vars")
     print(f"                      in /etc/systemd/system/daytona-runner.service")
-    print(f"                  The customer's failure mode (\"runner is missing")
-    print(f"                  object storage/S3 configuration\") is fixed by")
-    print(f"                  the AWS_* env vars in the systemd unit. See")
-    print(f"                  charts/daytona-region/README.md '#declarative-")
-    print(f"                  builder-setup-byoc'.")
+    print(f"                  Both rely on the runner's AWS_* env vars in the")
+    print(f"                  systemd unit. See charts/daytona-region/README.md")
+    print(f"                  '#declarative-builder-setup-byoc'.")
 else:
     print(f"      Result:     NOT VERIFIED (Stage B {b['status']})")
     print(f"      Evidence:   {b['evidence']}")
@@ -585,4 +579,4 @@ S3_BEFORE_STAGE_B="$S3_BEFORE_STAGE_B" \
 ECR_TEST_IMAGE="$ECR_TEST_IMAGE" \
 ECR_PULLER_ROLE_ARN="$ECR_PULLER_ROLE_ARN" \
 DAYTONA_REGISTRY_ID="$DAYTONA_REGISTRY_ID" \
-  python3 /tmp/cmc-aws-e2e.py
+  python3 /tmp/byoc-aws-e2e.py

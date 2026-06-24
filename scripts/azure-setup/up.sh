@@ -10,11 +10,14 @@
 #   6. installs ingress-nginx + cert-manager + Let's Encrypt ClusterIssuer
 #   7. waits for LoadBalancer hostname, prints DNS records
 #   8. waits for operator to confirm DNS propagation
-#   9. renders values-region.yaml.tmpl and helm-installs daytona-region
-#  10. prints proxy URL for sandbox-create testing
+#   9. generates SSH gateway keypairs, renders values-region.yaml.tmpl and
+#      helm-installs daytona-region
+#  10. post-registration: swaps in the region-scoped ssh-gateway api key and
+#      advertises the gateway LoadBalancer to Daytona Cloud
+#  11. prints proxy URL for sandbox-create testing
 #
-# Verifies that the AKS docker-installer tarball fallback fires (Prompt 1 d1892ef).
-# See docs/byoc-overhaul/azure.md (in this repo) for the full test loop.
+# Verifies that the AKS docker-installer tarball fallback fires.
+# See docs/azure.md for the deployment guide.
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -26,7 +29,7 @@ source "$SCRIPT_DIR/../_lib/sku-data.sh"
 # shellcheck source=../_lib/sku-azure.sh
 source "$SCRIPT_DIR/../_lib/sku-azure.sh"
 
-omc::need_cmd az kubectl helm envsubst yq jq openssl
+omc::need_cmd az kubectl helm envsubst yq jq openssl ssh-keygen curl
 
 STATE_DIR="$(omc::state_dir "$SCRIPT_DIR")"
 PROMPTS_FILE="$STATE_DIR/prompts.env"
@@ -51,7 +54,7 @@ omc::prompt CLUSTER_NAME "Cluster name" "daytona-byoc-$(date +%Y%m%d-%H%M%S)"
 omc::prompt BASE_DOMAIN  "Public base DNS domain"
 omc::prompt REGION_NAME  "Daytona region name" "${CLUSTER_NAME}"
 omc::prompt CLUSTER_ISSUER_EMAIL "Email for Let's Encrypt ClusterIssuer"
-omc::prompt DAYTONA_API_URL "Daytona Cloud API URL" "https://api.daytona.io"
+omc::prompt DAYTONA_API_URL "Daytona Cloud API URL" "https://app.daytona.io/api"
 omc::prompt_secret DAYTONA_API_KEY "Daytona Cloud admin API key"
 omc::prompt AZURE_LOCATION "Azure region" "eastus"
 omc::prompt RESOURCE_GROUP "Azure resource group" "${CLUSTER_NAME}-rg"
@@ -235,11 +238,36 @@ kubectl -n daytona rollout status deployment/rclone-s3-gateway --timeout=180s ||
 
 RCLONE_GATEWAY_ENDPOINT="http://rclone-s3-gateway.daytona:8080"
 
+# Persist S3-shaped storage coordinates so migrate-oss-to-byoc.sh path (a) can
+# auto-pick them up (it sources $STATE_DIR/byoc-storage.env for BLOB_BUCKET,
+# RCLONE_*, RCLONE_GATEWAY_ENDPOINT). Without this the OSS->BYOC migration
+# silently skips runner backup storage unless the operator sets RUNNER_S3_*.
+{
+  printf 'export BLOB_BUCKET=%q\n'             "$BLOB_BUCKET"
+  printf 'export RCLONE_ACCESS_KEY=%q\n'       "$RCLONE_ACCESS_KEY"
+  printf 'export RCLONE_SECRET_KEY=%q\n'       "$RCLONE_SECRET_KEY"
+  printf 'export RCLONE_GATEWAY_ENDPOINT=%q\n' "$RCLONE_GATEWAY_ENDPOINT"
+} > "$STATE_DIR/byoc-storage.env"
+chmod 600 "$STATE_DIR/byoc-storage.env"
+omc::log INFO "Wrote S3-shaped storage coords -> $STATE_DIR/byoc-storage.env (for migrate-oss-to-byoc.sh)"
+
 # === 7. ingress-nginx + cert-manager + ClusterIssuer =========================
 omc::log INFO "=== Step 7/9: ingress-nginx + cert-manager ==="
 omc::ingress_nginx_install
 omc::cert_manager_install
-omc::cluster_issuer_apply "$CLUSTER_ISSUER_EMAIL"
+# Wildcard SANs (*.proxy.<domain>) for per-sandbox preview certs can only be
+# issued via DNS-01. If a Cloudflare API token is supplied, use the DNS-01
+# issuer and enable the wildcard SAN; otherwise install the HTTP-01 issuer and
+# keep the proxy cert NON-wildcard so it actually issues (Let's Encrypt cannot
+# satisfy a wildcard over HTTP-01). See docs/troubleshooting.md.
+if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  omc::cluster_issuer_apply_cf_dns01 "$CLUSTER_ISSUER_EMAIL" "$CLOUDFLARE_API_TOKEN"
+  PROXY_WILDCARD_TLS=true
+else
+  omc::cluster_issuer_apply "$CLUSTER_ISSUER_EMAIL"
+  PROXY_WILDCARD_TLS=false
+fi
+export PROXY_WILDCARD_TLS
 
 # === 8. Wait for LoadBalancer + DNS records ==================================
 omc::log INFO "=== Step 8/9: Wait for LoadBalancer + DNS ==="
@@ -249,8 +277,9 @@ omc::print_dns_records "$BASE_DOMAIN" "$LB_TARGET"
 omc::confirm "Have you created the DNS records above and waited for propagation?" \
   || omc::die "Aborted by operator. Re-run after creating DNS records."
 
-# === 9. Render values + helm install =========================================
-omc::log INFO "=== Step 9/9: helm install daytona-region ==="
+# === 9. SSH keys + render values + helm install ==============================
+omc::log INFO "=== Step 9/10: helm install daytona-region ==="
+omc::ssh_keys_ensure "$STATE_DIR"
 export CLUSTER_NAME BASE_DOMAIN REGION_NAME DAYTONA_API_URL DAYTONA_API_KEY \
        AZURE_REGION BLOB_BUCKET RCLONE_GATEWAY_ENDPOINT \
        RCLONE_ACCESS_KEY RCLONE_SECRET_KEY \
@@ -259,22 +288,35 @@ export CLUSTER_NAME BASE_DOMAIN REGION_NAME DAYTONA_API_URL DAYTONA_API_KEY \
 omc::render_template "$SCRIPT_DIR/values-region.yaml.tmpl" "$VALUES_OUT"
 omc::helm_install_wait daytona-region "$SCRIPT_DIR/../../charts/daytona-region" daytona "$VALUES_OUT"
 
+# === 10. Region-scoped ssh-gateway key + sshGatewayUrl =======================
+# Cannot happen earlier: the key only exists after the registration hook has
+# created the region during helm install.
+omc::log INFO "=== Step 10/10: finalize ssh-gateway (region-scoped key) ==="
+omc::region_sshgateway_finalize daytona daytona-region \
+  "$SCRIPT_DIR/../../charts/daytona-region" "$VALUES_OUT" \
+  "$DAYTONA_API_URL" "$DAYTONA_API_KEY"
+
 # === Summary =================================================================
 cat >&2 <<EOF
 
 ==================== BRING-UP COMPLETE ====================
 Proxy URL:         https://proxy.${BASE_DOMAIN}
-Snapshot manager:  https://snapshots.${BASE_DOMAIN}
-rclone gateway:    $RCLONE_GATEWAY_ENDPOINT (in-cluster)
+Snapshot manager:  https://snapshots.${BASE_DOMAIN}  (registry data on PVC)
+rclone gateway:    $RCLONE_GATEWAY_ENDPOINT (in-cluster, runner backups only)
 
 Next steps:
   1. Verify AKS docker-installer tarball fallback fired:
        kubectl -n daytona logs daemonset/daytona-region-runner -c docker-installer \\
          | grep -E 'static.*tarball|dockerd not installed by deb'
   2. Open Daytona Cloud dashboard for ${REGION_NAME}
-  3. Create a sandbox via the web UI
+  3. Create a snapshot in this region, then a sandbox from it (web UI or API)
   4. Run smoke test:   bash $SCRIPT_DIR/e2e.sh
   5. Teardown:         bash $SCRIPT_DIR/teardown.sh
+
+Future manual upgrades MUST pass both values files or SSH breaks:
+  helm upgrade daytona-region charts/daytona-region -n daytona \\
+    -f $VALUES_OUT \\
+    -f $STATE_DIR/values-sshgateway-key.yaml
 
 State persisted in: $STATE_DIR
 ===========================================================

@@ -15,7 +15,7 @@
 #  10. renders values-region.yaml.tmpl and helm-installs daytona-region
 #  11. prints proxy URL for sandbox-create testing
 #
-# See docs/byoc-overhaul/gcp.md (in this repo) for the full test loop.
+# See docs/gcp.md for the deployment guide.
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -27,7 +27,7 @@ source "$SCRIPT_DIR/../_lib/sku-data.sh"
 # shellcheck source=../_lib/sku-gcp.sh
 source "$SCRIPT_DIR/../_lib/sku-gcp.sh"
 
-omc::need_cmd gcloud kubectl helm envsubst yq jq
+omc::need_cmd gcloud kubectl helm envsubst yq jq ssh-keygen curl
 
 STATE_DIR="$(omc::state_dir "$SCRIPT_DIR")"
 PROMPTS_FILE="$STATE_DIR/prompts.env"
@@ -51,7 +51,7 @@ omc::prompt CLUSTER_NAME "Cluster name" "daytona-byoc-$(date +%Y%m%d-%H%M%S)"
 omc::prompt BASE_DOMAIN  "Public base DNS domain"
 omc::prompt REGION_NAME  "Daytona region name" "${CLUSTER_NAME}"
 omc::prompt CLUSTER_ISSUER_EMAIL "Email for Let's Encrypt ClusterIssuer"
-omc::prompt DAYTONA_API_URL "Daytona Cloud API URL" "https://api.daytona.io"
+omc::prompt DAYTONA_API_URL "Daytona Cloud API URL" "https://app.daytona.io/api"
 omc::prompt_secret DAYTONA_API_KEY "Daytona Cloud admin API key"
 omc::prompt GCP_PROJECT "GCP project ID"
 omc::prompt GCP_REGION "GCP region" "us-central1"
@@ -181,7 +181,19 @@ kubectl label namespace daytona \
 omc::log INFO "=== Step 7/10: ingress-nginx + cert-manager ==="
 omc::ingress_nginx_install
 omc::cert_manager_install
-omc::cluster_issuer_apply "$CLUSTER_ISSUER_EMAIL"
+# Wildcard SANs (*.proxy.<domain>) for per-sandbox preview certs can only be
+# issued via DNS-01. If a Cloudflare API token is supplied, use the DNS-01
+# issuer and enable the wildcard SAN; otherwise install the HTTP-01 issuer and
+# keep the proxy cert NON-wildcard so it actually issues (Let's Encrypt cannot
+# satisfy a wildcard over HTTP-01). See docs/troubleshooting.md.
+if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  omc::cluster_issuer_apply_cf_dns01 "$CLUSTER_ISSUER_EMAIL" "$CLOUDFLARE_API_TOKEN"
+  PROXY_WILDCARD_TLS=true
+else
+  omc::cluster_issuer_apply "$CLUSTER_ISSUER_EMAIL"
+  PROXY_WILDCARD_TLS=false
+fi
+export PROXY_WILDCARD_TLS
 
 # === 8. Wait for LoadBalancer + DNS records ==================================
 omc::log INFO "=== Step 8/10: Wait for LoadBalancer + DNS ==="
@@ -191,14 +203,23 @@ omc::print_dns_records "$BASE_DOMAIN" "$LB_TARGET"
 omc::confirm "Have you created the DNS records above and waited for propagation?" \
   || omc::die "Aborted by operator. Re-run after creating DNS records."
 
-# === 9. Render values + helm install =========================================
+# === 9. SSH keys + render values + helm install ==============================
 omc::log INFO "=== Step 9/10: helm install daytona-region ==="
+omc::ssh_keys_ensure "$STATE_DIR"
 export CLUSTER_NAME BASE_DOMAIN REGION_NAME DAYTONA_API_URL DAYTONA_API_KEY \
        GCS_LOCATION GCS_BUCKET HMAC_ACCESS_KEY HMAC_SECRET_KEY \
        RUNNER_AWS_CREDENTIAL_MODE GCP_SERVICE_ACCOUNT_EMAIL RUNNER_IMAGE_TAG \
        INTERNAL_REGISTRY_HOST=""
 omc::render_template "$SCRIPT_DIR/values-region.yaml.tmpl" "$VALUES_OUT"
 omc::helm_install_wait daytona-region "$SCRIPT_DIR/../../charts/daytona-region" daytona "$VALUES_OUT"
+
+# === 10. Region-scoped ssh-gateway key + sshGatewayUrl =======================
+# Cannot happen earlier: the key only exists after the registration hook has
+# created the region during helm install.
+omc::log INFO "=== Step 10/10: finalize ssh-gateway (region-scoped key) ==="
+omc::region_sshgateway_finalize daytona daytona-region \
+  "$SCRIPT_DIR/../../charts/daytona-region" "$VALUES_OUT" \
+  "$DAYTONA_API_URL" "$DAYTONA_API_KEY"
 
 # === Summary =================================================================
 cat >&2 <<EOF
@@ -210,9 +231,14 @@ Snapshot manager:  https://snapshots.${BASE_DOMAIN}
 Next steps:
   1. Open Daytona Cloud dashboard for ${REGION_NAME}
   2. Verify runner: kubectl -n daytona get pods
-  3. Create a sandbox via the web UI to validate end-to-end
+  3. Create a snapshot in this region, then a sandbox from it (web UI or API)
   4. Run smoke test:   bash $SCRIPT_DIR/e2e.sh
   5. Teardown:         bash $SCRIPT_DIR/teardown.sh
+
+Future manual upgrades MUST pass both values files or SSH breaks:
+  helm upgrade daytona-region charts/daytona-region -n daytona \\
+    -f $VALUES_OUT \\
+    -f $STATE_DIR/values-sshgateway-key.yaml
 
 State persisted in: $STATE_DIR
 HMAC keys:          $HMAC_FILE (mode 0600 — treat as secret)

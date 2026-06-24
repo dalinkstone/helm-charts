@@ -49,6 +49,12 @@ spec:
           env:
             - name: API_PORT
               value: {{ .Values.services.runnermanager.env.API_PORT | default "3010" | quote }}
+            # Floor of ready runners the manager maintains. Default 2 so a region
+            # NEVER runs on a single runner: when one is rolled/lost, a peer is
+            # already up for sandboxes to migrate onto. Pairs with the >=2 sandbox
+            # node pool (otherwise the extra runner pod has nowhere to schedule).
+            - name: MIN_RUNNERS
+              value: {{ .Values.services.runnermanager.env.MIN_RUNNERS | default "2" | quote }}
             # Daytona org API key (Bearer) — same value as daytonaApiKey / registration hook secret
             - name: API_TOKEN
               valueFrom:
@@ -126,6 +132,13 @@ spec:
         {{- if .Values.services.runnermanager.extraVolumes }}
         {{- include "daytona.tplvalues.render" (dict "value" .Values.services.runnermanager.extraVolumes "context" $) | nindent 8 }}
         {{- end }}
+      {{- with .Values.dnsPolicy }}
+      dnsPolicy: {{ . }}
+      {{- end }}
+      {{- with .Values.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.services.runnermanager.nodeSelector | default .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

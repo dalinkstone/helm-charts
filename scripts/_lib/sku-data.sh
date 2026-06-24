@@ -8,8 +8,13 @@
 #   * x86_64 ONLY across all clouds (the chart's docker-installer downloads
 #     Ubuntu 24.04 noble amd64 .debs; ARM/Graviton/tau-t2a are excluded).
 
-# AWS instance type families (general-purpose + compute + burstable, all x86_64)
-export OMC_AWS_FAMILIES="m5 m6i m7i c5 c6i c7i t3 t3a"
+# AWS instance type families (general-purpose + compute + memory + burstable),
+# x86_64 ONLY (the chart's docker-installer pulls Ubuntu 24.04 amd64 .debs, so
+# Graviton/ARM is excluded). Broad on purpose: a too-narrow list drops types an
+# account/AZ can actually launch. Intel (i) and AMD (a) variants of m/c/r across
+# generations 4-7, plus t3 burstable. Every family listed here MUST have an
+# omc::sku_rank case below, or select(.rank > 0) in sku-aws.sh drops it.
+export OMC_AWS_FAMILIES="m7i m7a c7i c7a r7i r7a m6i m6a c6i c6a r6i r6a m5 m5a c5 c5a r5 m4 c4 t3 t3a"
 
 # Azure VM SKU families (D-series v3/v4/v5/v6 + B-series burstable, all x86_64)
 # These match the `family` field in `az vm list-skus` / `az vm list-usage`.
@@ -23,12 +28,25 @@ export OMC_GCP_FAMILIES="e2 n2 c3"
 omc::sku_rank() {
   local cloud="$1" family="$2"
   case "$cloud:$family" in
-    aws:m7i) echo 70 ;;
-    aws:c7i) echo 69 ;;
-    aws:m6i) echo 60 ;;
-    aws:c6i) echo 59 ;;
-    aws:m5)  echo 50 ;;
-    aws:c5)  echo 49 ;;
+    aws:m7i) echo 90 ;;
+    aws:m7a) echo 89 ;;
+    aws:c7i) echo 88 ;;
+    aws:c7a) echo 87 ;;
+    aws:r7i) echo 86 ;;
+    aws:r7a) echo 85 ;;
+    aws:m6i) echo 80 ;;
+    aws:m6a) echo 79 ;;
+    aws:c6i) echo 78 ;;
+    aws:c6a) echo 77 ;;
+    aws:r6i) echo 76 ;;
+    aws:r6a) echo 75 ;;
+    aws:m5)  echo 70 ;;
+    aws:m5a) echo 69 ;;
+    aws:c5)  echo 68 ;;
+    aws:c5a) echo 67 ;;
+    aws:r5)  echo 66 ;;
+    aws:m4)  echo 50 ;;
+    aws:c4)  echo 49 ;;
     aws:t3a) echo 30 ;;
     aws:t3)  echo 29 ;;
     azure:standardDSv6Family)   echo 70 ;;

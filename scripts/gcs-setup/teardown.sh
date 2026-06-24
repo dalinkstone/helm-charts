@@ -3,14 +3,16 @@
 # Pairs with up.sh. Idempotent. Continues on error.
 #
 # Reverse-create order:
-#   1. helm uninstall daytona-region
-#   2. kubectl delete ns daytona
-#   3. delete HMAC keys for the GSA
-#   4. delete IAM policy binding on bucket
-#   5. delete GSA
-#   6. delete GCS bucket (recursive)
-#   7. delete GKE cluster
-#   8. cleanup local .state/
+#   1.  helm uninstall daytona-region
+#   1b. helm uninstall ingress-nginx + release Service type=LoadBalancer so GCP
+#       frees the LB forwarding/firewall rules before the cluster is deleted
+#   2.  kubectl delete ns daytona
+#   3.  delete HMAC keys for the GSA
+#   4.  delete IAM policy binding on bucket
+#   5.  delete GSA
+#   6.  delete GCS bucket (recursive)
+#   7.  delete GKE cluster
+#   8.  cleanup local .state/
 set -uo pipefail
 IFS=$'\n\t'
 
@@ -52,11 +54,31 @@ omc::need_cmd gcloud kubectl helm jq
 
 gcloud config set project "$GCP_PROJECT" >/dev/null 2>&1 || true
 
-# === 1. helm uninstall + delete namespace ====================================
+# === 1. helm uninstall + release load balancers + delete namespace ==========
 if kubectl get ns daytona >/dev/null 2>&1; then
   helm uninstall daytona-region -n daytona --wait --timeout 5m 2>/dev/null \
     && omc::log INFO "helm uninstalled daytona-region" \
     || omc::log WARN "helm uninstall failed or absent"
+fi
+# Uninstall ingress-nginx and delete any remaining Service type=LoadBalancer so
+# GCP frees the forwarding + firewall rules BEFORE the cluster is deleted.
+# up.sh never uninstalls ingress-nginx, so without this its LB (and the k8s-*
+# forwarding/firewall rules) can orphan when the cluster delete races the
+# cloud-controller. helm uninstall --wait also drops the snapshot PVC so its
+# persistent disk is reclaimed before the cluster goes away.
+helm uninstall ingress-nginx -n ingress-nginx --wait --timeout 5m 2>/dev/null \
+  && omc::log INFO "helm uninstalled ingress-nginx" \
+  || omc::log WARN "ingress-nginx uninstall failed or absent"
+if kubectl cluster-info >/dev/null 2>&1; then
+  while IFS= read -r lb_line; do
+    [[ -z "$lb_line" ]] && continue
+    lb_ns="${lb_line%%/*}"; lb_name="${lb_line##*/}"
+    kubectl delete svc "$lb_name" -n "$lb_ns" --wait=true --timeout=3m 2>/dev/null \
+      && omc::log INFO "released LoadBalancer svc $lb_line" || true
+  done < <(kubectl get svc -A \
+      -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null)
+fi
+if kubectl get ns daytona >/dev/null 2>&1; then
   kubectl delete namespace daytona --wait=false 2>/dev/null \
     && omc::log INFO "namespace daytona deletion initiated" \
     || omc::log WARN "namespace delete failed or absent"
@@ -123,5 +145,9 @@ Verify with:
     (expect 404)
   gcloud iam service-accounts describe $GSA_EMAIL
     (expect 404)
+  gcloud compute forwarding-rules list --filter="name~'^k8s'" --project $GCP_PROJECT
+    (expect empty — else delete leftover LB forwarding rules)
+  gcloud compute disks list --filter="name~'pvc-'" --project $GCP_PROJECT
+    (expect empty — else delete leftover snapshot persistent disks)
 ===========================================================
 EOF

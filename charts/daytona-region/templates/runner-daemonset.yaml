@@ -46,6 +46,13 @@ spec:
       hostNetwork: true
       hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.dnsConfig }}
+      # hostNetwork pod: the global .Values.dnsPolicy is intentionally NOT
+      # applied here (ClusterFirstWithHostNet is required for cluster DNS),
+      # but custom resolvers/searches/options are still merged in.
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: {{ include "daytona.serviceAccountName" (dict "Values" .Values "service" "runner" "Chart" .Chart "Release" .Release) }}
       terminationGracePeriodSeconds: 30
       {{- if .Values.services.runner.hostAliases }}
@@ -449,7 +456,20 @@ spec:
                   echo "⚠ $DOCKER_DIR is on $FS_TYPE, not XFS"
                   echo "Will attempt to migrate to XFS loopback..."
                 fi
-                
+
+                # SAFETY GUARD: never migrate a populated Docker root. If
+                # /var/lib/docker already holds containers (a previous run, i.e.
+                # live sandboxes on this node), moving it aside makes dockerd come
+                # up empty — every running sandbox then returns 404 "No such
+                # container" while its API row stays state=started, which a
+                # DaemonSet roll cannot self-heal. Migration is only safe on a
+                # pristine node; this stops a destructive re-migration on every
+                # subsequent roll if the XFS mount ever fails to stick.
+                if [ -d "$DOCKER_DIR/containers" ] && [ -n "$(ls -A "$DOCKER_DIR/containers" 2>/dev/null)" ]; then
+                  echo "⚠ $DOCKER_DIR already contains Docker containers — refusing XFS migration to avoid orphaning running sandboxes; keeping existing storage (no per-sandbox quota until the node is drained and re-provisioned)."
+                  return 0
+                fi
+
                 # Stop Docker before migration
                 systemctl stop docker 2>/dev/null || true
                 
@@ -515,6 +535,9 @@ spec:
                   }
                 },
                 "default-runtime": "sysbox-runc",
+                {{- if .Values.services.runner.dockerInstaller.liveRestore }}
+                "live-restore": true,
+                {{- end }}
                 {{- if .Values.services.runner.dockerInstaller.dns }}
                 "dns": {{ .Values.services.runner.dockerInstaller.dns | toJson }},
                 {{- end }}
@@ -549,15 +572,50 @@ spec:
               
               # Configure Docker to use Sysbox
               configure_docker_sysbox
+              {{- if .Values.services.runner.buildkit.dns.nameservers }}
+
+              # Write BuildKit DNS config (chart: services.runner.buildkit.dns).
+              # Build ("RUN ...") containers do not reliably inherit the docker
+              # daemon's "dns" setting; standalone buildkitd reads this file.
+              mkdir -p /etc/buildkit
+              cat > /etc/buildkit/buildkitd.toml << 'BUILDKITCONFIG'
+              [dns]
+                nameservers = {{ .Values.services.runner.buildkit.dns.nameservers | toJson }}
+              {{- if .Values.services.runner.buildkit.dns.searchDomains }}
+                searchDomains = {{ .Values.services.runner.buildkit.dns.searchDomains | toJson }}
+              {{- end }}
+              {{- if .Values.services.runner.buildkit.dns.options }}
+                options = {{ .Values.services.runner.buildkit.dns.options | toJson }}
+              {{- end }}
+              BUILDKITCONFIG
+              echo "BuildKit DNS config written to /etc/buildkit/buildkitd.toml"
+              {{- end }}
               
               # Start Sysbox services
               echo "Starting Sysbox services..."
               systemctl enable sysbox 2>/dev/null || true
               systemctl start sysbox 2>/dev/null || true
               
-              # Start Docker
-              echo "Starting Docker with Sysbox runtime..."
-              systemctl restart docker
+              # Start Docker. Only bounce the host daemon when the config actually
+              # changed or docker isn't already running with the sysbox runtime. A
+              # blind `restart` on a no-op DaemonSet roll bounces the host dockerd
+              # and stops every running sandbox that predates live-restore taking
+              # effect, so we avoid restarting unless it is truly necessary.
+              echo "Ensuring Docker is running with the Sysbox runtime..."
+              need_restart=0
+              if ! systemctl is-active --quiet docker; then
+                need_restart=1
+              elif ! docker info 2>/dev/null | grep -q 'sysbox-runc'; then
+                need_restart=1
+              elif [ -f /etc/docker/daemon.json.bak ] && ! cmp -s /etc/docker/daemon.json /etc/docker/daemon.json.bak; then
+                need_restart=1
+              fi
+              if [ "$need_restart" = 1 ]; then
+                echo "Restarting Docker (first install, or daemon.json/runtime change)..."
+                systemctl restart docker
+              else
+                echo "Docker already running with Sysbox runtime and unchanged config; skipping restart to avoid disrupting running sandboxes"
+              fi
               
               # Verify installation
               echo "=== Verification ==="
@@ -592,6 +650,126 @@ spec:
                 sleep 60
               done
               ln -s /host/var/lib/docker /var/lib/docker
+        {{- end }}
+        {{- if .Values.services.runner.networkPolicy.enabled }}
+        {{- $np := .Values.services.runner.networkPolicy }}
+        {{- $npHash := printf "%s|%v|%v|%v|%v" $np.policyMode $np.blockCIDRs $np.allowCIDRs $np.blockHostPorts .Values.services.runner.dockerInstaller.dns | sha256sum | trunc 12 }}
+        # Sandbox egress policy reconciler. Programs the SBX_EGRESS (FORWARD
+        # path, hooked from DOCKER-USER which docker never flushes) and
+        # SBX_INPUT (host-local services) iptables chains in the HOST netns
+        # via nsenter, covering the default docker0 bridge and any br-+
+        # user-defined bridges (the runner's runner-bridge included). Rules
+        # carry a config-hash marker so the chain is only rebuilt when chart
+        # values change; the jumps are re-asserted every cycle in case of
+        # dockerd restarts. See values: services.runner.networkPolicy.
+        - name: egress-enforcer
+          image: {{ $np.image | default .Values.services.runner.dockerInstaller.image }}
+          securityContext:
+            privileged: true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Sandbox egress policy: mode={{ $np.policyMode }} cfg=sbx-cfg-{{ $npHash }}"
+              while true; do
+                nsenter -t 1 -m -u -n -i sh <<'SBXEOF' || echo "egress reconcile failed; retrying..."
+              ipt() { iptables -w "$@"; }
+              if ! ipt -C SBX_EGRESS -m comment --comment "sbx-cfg-{{ $npHash }}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null; then
+                echo "(re)building SBX_EGRESS/SBX_INPUT chains (sbx-cfg-{{ $npHash }})"
+                ipt -t filter -N SBX_EGRESS 2>/dev/null || true
+                ipt -t filter -F SBX_EGRESS
+                # marker + return traffic of runner->sandbox connections
+                ipt -A SBX_EGRESS -m comment --comment "sbx-cfg-{{ $npHash }}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+              {{- range .Values.services.runner.dockerInstaller.dns }}
+                # sandbox DNS resolver (dockerInstaller.dns) — always reachable
+                ipt -A SBX_EGRESS -d {{ . }}/32 -j RETURN
+              {{- end }}
+              {{- range $np.allowCIDRs }}
+                ipt -A SBX_EGRESS -d {{ . }} -j RETURN
+              {{- end }}
+              {{- if eq $np.policyMode "allowlist" }}
+                # deny-by-default: everything not explicitly allowed is dropped
+                ipt -A SBX_EGRESS -j DROP
+              {{- else }}
+              {{- range $np.blockCIDRs }}
+                ipt -A SBX_EGRESS -d {{ . }} -j DROP
+              {{- end }}
+              {{- end }}
+                ipt -t filter -N SBX_INPUT 2>/dev/null || true
+                ipt -t filter -F SBX_INPUT
+              {{- range $np.blockHostPorts }}
+                ipt -A SBX_INPUT -p tcp --dport {{ . }} -j DROP
+              {{- end }}
+              fi
+              # keep the chains attached (cheap, idempotent, survives dockerd restarts)
+              ipt -t filter -N DOCKER-USER 2>/dev/null || true
+              ipt -C FORWARD -j DOCKER-USER 2>/dev/null || ipt -I FORWARD 1 -j DOCKER-USER
+              for IFACE in docker0 br-+; do
+                ipt -C DOCKER-USER -i "$IFACE" -j SBX_EGRESS 2>/dev/null || ipt -I DOCKER-USER 1 -i "$IFACE" -j SBX_EGRESS
+                ipt -C INPUT -i "$IFACE" -j SBX_INPUT 2>/dev/null || ipt -I INPUT 1 -i "$IFACE" -j SBX_INPUT
+              done
+              SBXEOF
+                sleep {{ $np.reconcileSeconds | default 30 }}
+              done
+        {{- end }}
+        {{- if .Values.services.runner.sandboxResources.enabled }}
+        {{- $sr := .Values.services.runner.sandboxResources }}
+        # Fractional sandbox CPU reconciler. The upstream runner grants whole
+        # cores (cpu-quota = vCPUs x 100000); this sidecar rewrites each new
+        # sandbox container's quota to limitMillicoresPerVcpu per declared
+        # vCPU (and optionally cpu.shares as the request analog). Sandbox
+        # containers are the only host-docker containers named with a UUID.
+        # Applied once per container id (markers under stateDir).
+        - name: sandbox-cpu-reconciler
+          image: {{ $sr.image }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              LIMIT_MILLI={{ $sr.limitMillicoresPerVcpu | int }}
+              REQ_MILLI={{ $sr.requestMillicoresPerVcpu | int }}
+              STATE=/sandbox-cpu-state
+              UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+              echo "sandbox CPU reconciler: limit=${LIMIT_MILLI}m/vCPU request=${REQ_MILLI}m/vCPU"
+              mkdir -p "$STATE"
+              while true; do
+                docker ps --format '{{`{{.ID}} {{.Names}}`}}' 2>/dev/null | while read -r CID NAME; do
+                  echo "$NAME" | grep -Eq "$UUID_RE" || continue
+                  [ -e "$STATE/$CID" ] && continue
+                  QUOTA=$(docker inspect -f '{{`{{.HostConfig.CpuQuota}}`}}' "$CID" 2>/dev/null) || continue
+                  PERIOD=$(docker inspect -f '{{`{{.HostConfig.CpuPeriod}}`}}' "$CID" 2>/dev/null) || continue
+                  if [ -z "$QUOTA" ] || [ "$QUOTA" -le 0 ] || [ -z "$PERIOD" ] || [ "$PERIOD" -le 0 ]; then
+                    # no CPU limit set (RESOURCE_LIMITS_DISABLED) — leave untouched
+                    : > "$STATE/$CID"
+                    continue
+                  fi
+                  VCPUS=$(( (QUOTA + PERIOD - 1) / PERIOD ))
+                  [ "$VCPUS" -lt 1 ] && VCPUS=1
+                  NEW_QUOTA=$(( VCPUS * LIMIT_MILLI * 100 ))
+                  SET_ARGS="--cpu-period 100000 --cpu-quota $NEW_QUOTA"
+                  if [ "$REQ_MILLI" -gt 0 ]; then
+                    SHARES=$(( VCPUS * REQ_MILLI * 1024 / 1000 ))
+                    [ "$SHARES" -lt 2 ] && SHARES=2
+                    SET_ARGS="$SET_ARGS --cpu-shares $SHARES"
+                  fi
+                  if docker update $SET_ARGS "$CID" >/dev/null 2>&1; then
+                    : > "$STATE/$CID"
+                    echo "sandbox $NAME ($CID): ${VCPUS} vCPU -> cpu-quota ${NEW_QUOTA}/100000"
+                  else
+                    echo "docker update failed for $NAME ($CID); will retry"
+                  fi
+                done
+                # drop markers of containers that no longer exist
+                ALL_IDS=" $(docker ps -aq 2>/dev/null | tr '\n' ' ') "
+                for f in "$STATE"/*; do
+                  [ -e "$f" ] || continue
+                  case "$ALL_IDS" in *" $(basename "$f") "*) ;; *) rm -f "$f" ;; esac
+                done
+                sleep {{ $sr.reconcileSeconds | default 10 }}
+              done
+          volumeMounts:
+            - name: host-docker-socket
+              mountPath: /var/run/
+            - name: sandbox-cpu-state
+              mountPath: /sandbox-cpu-state
         {{- end }}
         {{- if .Values.services.runner.daemonInstaller.enabled }}
         # Daytona daemon binary installer sidecar.
@@ -790,6 +968,22 @@ spec:
               mountPath: /etc/docker/daemon.json
               subPath: daemon.json
             {{- end }}
+            {{- if .Values.services.runner.volumes.backend }}
+            # Volume (volume.share) support: the runner FUSE-mounts buckets at
+            # {{ .Values.services.runner.volumes.hostMountPath }}/daytona-volume-<id>; Bidirectional propagation
+            # makes those mounts visible on the HOST so the host dockerd can
+            # bind-mount them into sandbox containers.
+            - name: volume-host-mnt
+              mountPath: {{ .Values.services.runner.volumes.hostMountPath | quote }}
+              mountPropagation: Bidirectional
+            {{- if has .Values.services.runner.volumes.backend (list "gcs" "rclone") }}
+            # Shim shadowing the hardcoded `mount-s3` binary name with a
+            # delegating wrapper (/usr/local/bin precedes /usr/bin in PATH).
+            - name: volume-mount-shim
+              mountPath: /usr/local/bin/mount-s3
+              subPath: mount-s3
+            {{- end }}
+            {{- end }}
             {{- with .Values.services.runner.extraVolumeMounts }}
             {{- include "daytona.tplvalues.render" (dict "value" . "context" $) | nindent 12 }}
             {{- end }}
@@ -811,6 +1005,28 @@ spec:
           configMap:
             name: {{ include "daytona.fullname" . }}-runner-docker-daemon-config
         {{- end }}
+        {{- if .Values.services.runner.volumes.backend }}
+        - name: volume-host-mnt
+          hostPath:
+            path: {{ .Values.services.runner.volumes.hostMountPath | quote }}
+            type: DirectoryOrCreate
+        {{- if has .Values.services.runner.volumes.backend (list "gcs" "rclone") }}
+        - name: volume-mount-shim
+          configMap:
+            name: {{ include "daytona.fullname" . }}-volume-shim
+            defaultMode: 0755
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.services.runner.sandboxResources.enabled }}
+        - name: host-docker-socket
+          hostPath:
+            path: /var/run/
+            type: Directory
+        - name: sandbox-cpu-state
+          hostPath:
+            path: {{ .Values.services.runner.sandboxResources.stateDir | quote }}
+            type: DirectoryOrCreate
         {{- end }}
         {{- if .Values.services.runner.extraVolumes }}
         {{- include "daytona.tplvalues.render" (dict "value" .Values.services.runner.extraVolumes "context" $) | nindent 8 }}
