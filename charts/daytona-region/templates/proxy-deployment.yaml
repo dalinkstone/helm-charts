@@ -1,3 +1,4 @@
+{{- include "daytona.validateImageBundle" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,8 +21,10 @@ spec:
       app.kubernetes.io/component: proxy
   template:
     metadata:
-      {{- with .Values.services.proxy.podAnnotations }}
       annotations:
+        {{- include "daytona.imageBundleAnnotations" . | nindent 8 }}
+        daytona.io/image-version: {{ .Values.services.proxy.image.tag | default .Chart.AppVersion | quote }}
+      {{- with .Values.services.proxy.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:

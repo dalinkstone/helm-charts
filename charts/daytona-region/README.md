@@ -588,7 +588,34 @@ Snapshot-manager log shows `panic ... nil pointer` in `s3-aws.(*driver).Writer` 
 
 ### runnermanager ImagePullBackOff
 
-Not every chart `appVersion` has a matching `daytonaio/daytona-runner-manager` tag on Docker Hub. Keep the chart's pinned default tag, or verify the tag exists before overriding `services.runnermanager.image.tag`.
+The chart defaults every version-coupled Daytona image to its `appVersion`,
+currently `v0.184.0-k8s-oss.3-amd64`. Docker Hub publishes that exact tag for
+proxy, runner (including its embedded sandbox daemon), snapshot-manager,
+ssh-gateway, and runner-manager. Do not override a single component in
+isolation. Before selecting a different bundle, verify the exact tag exists for
+all five repositories and confirm the bundle is compatible with the Daytona
+Cloud control-plane version.
+
+The chart rejects an accidental partial override at render time. Existing
+generated values from an older setup may still contain
+`services.runner.image.tag: v0.183.0`; re-run the cloud `up.sh` to regenerate
+the values file, or remove that override before upgrading.
+
+An intentionally mixed compatibility canary must opt in and name the bundle:
+
+```yaml
+imageBundle:
+  name: control-v0.199-runner-canary
+  allowVersionSkew: true
+```
+
+All five component pods are annotated with the bundle name, whether skew was
+approved, and their actual image tag. A private runner is special: the runner
+binary embeds the `daemon-amd64` toolbox and computer-use binaries injected
+into new sandboxes. Use `scripts/aws-setup/build-runner-image.sh` to build and
+verify that image; do not treat a raw runner binary as a complete Kubernetes
+image. Recreate sandboxes after changing the runner so they receive the newly
+extracted daemon/toolbox assets.
 
 ### ECR snapshot creation fails with `no basic auth credentials`
 

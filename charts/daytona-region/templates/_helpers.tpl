@@ -7,6 +7,49 @@ Expand the name of the chart.
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/* Resolve whether the five Daytona component tags are skewed. */}}
+{{- define "daytona.imageBundleSkewed" -}}
+{{- $proxy := .Values.services.proxy.image.tag | default .Chart.AppVersion -}}
+{{- $runner := .Values.services.runner.image.tag | default .Chart.AppVersion -}}
+{{- $snapshot := .Values.services.snapshotManager.image.tag | default .Chart.AppVersion -}}
+{{- $ssh := .Values.services.sshGateway.image.tag | default .Chart.AppVersion -}}
+{{- $manager := .Values.services.runnermanager.image.tag | default .Chart.AppVersion -}}
+{{- if or (ne $proxy $runner) (ne $proxy $snapshot) (ne $proxy $ssh) (ne $proxy $manager) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{/* Human-readable bundle identity recorded on component pods. */}}
+{{- define "daytona.imageBundleName" -}}
+{{- .Values.imageBundle.name | default (printf "parity-%s" .Chart.AppVersion) -}}
+{{- end -}}
+
+{{/*
+Validate the selected Daytona image bundle. Exact parity remains the safe
+default. Intentional skew requires both an explicit opt-in and a non-empty
+bundle name so a canary cannot be created by an accidental one-line override.
+The runner image supplies the sandbox daemon/toolbox binary, so its version is
+especially significant even when the sandbox base image is unchanged.
+*/}}
+{{- define "daytona.validateImageBundle" -}}
+{{- $proxy := .Values.services.proxy.image.tag | default .Chart.AppVersion -}}
+{{- $runner := .Values.services.runner.image.tag | default .Chart.AppVersion -}}
+{{- $snapshot := .Values.services.snapshotManager.image.tag | default .Chart.AppVersion -}}
+{{- $ssh := .Values.services.sshGateway.image.tag | default .Chart.AppVersion -}}
+{{- $manager := .Values.services.runnermanager.image.tag | default .Chart.AppVersion -}}
+{{- $skewed := eq (include "daytona.imageBundleSkewed" .) "true" -}}
+{{- if and $skewed (not .Values.imageBundle.allowVersionSkew) -}}
+{{- fail (printf "Daytona image version skew requires imageBundle.allowVersionSkew=true and a named tested bundle: proxy=%s runner=%s snapshot-manager=%s ssh-gateway=%s runner-manager=%s" $proxy $runner $snapshot $ssh $manager) -}}
+{{- end -}}
+{{- if and $skewed (empty .Values.imageBundle.name) -}}
+{{- fail "imageBundle.name is required when imageBundle.allowVersionSkew=true and component tags differ" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Common auditable pod annotations for the selected compatibility bundle. */}}
+{{- define "daytona.imageBundleAnnotations" -}}
+daytona.io/image-bundle: {{ include "daytona.imageBundleName" . | quote }}
+daytona.io/version-skew-approved: {{ .Values.imageBundle.allowVersionSkew | quote }}
+{{- end -}}
+
 {{/*
 Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).

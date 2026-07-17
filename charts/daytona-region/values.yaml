@@ -9,6 +9,17 @@ global:
   storageClass: ""
   namespace: "" # If not set, will default to Release.Namespace
 
+# Daytona component compatibility policy.
+#
+# By default every Daytona image must resolve to the same exact tag. A mixed
+# bundle is allowed only for an explicitly named canary after the operator has
+# verified the component/API contracts. This is intended for cases such as a
+# private v0.199 runner (which also embeds the sandbox daemon/toolbox) paired
+# with the newest publicly available proxy/snapshot/SSH/runner-manager images.
+imageBundle:
+  name: ""
+  allowVersionSkew: false
+
 # Region name (required) - unique identifier for this region
 regionName: ""
 
@@ -350,14 +361,36 @@ services:
     image:
       registry: docker.io
       repository: daytonaio/daytona-runner-manager
-      # NOTE: keep a tag that exists on Docker Hub for this BYOC fork lineage.
-      # v0.183.0 has no published daytona-runner-manager image (ImagePullBackOff).
-      tag: "v0.158.4-4-byoc-amd64"
+      # Empty inherits Chart.appVersion. The chart appVersion is deliberately
+      # pinned to a K8s BYOC tag published for ALL Daytona components; do not
+      # override this one component independently.
+      tag: ""
       pullPolicy: IfNotPresent
     service:
       type: ClusterIP
       port: 3010
       annotations: {}
+    # The manager image exposes /health on API_PORT. These probes detect a
+    # stopped or wedged process; runner-capacity reconciliation is verified
+    # separately because /health does not report stale provider state.
+    startupProbe:
+      enabled: true
+      path: /health
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 30
+    readinessProbe:
+      enabled: true
+      path: /health
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    livenessProbe:
+      enabled: true
+      path: /health
+      periodSeconds: 30
+      timeoutSeconds: 2
+      failureThreshold: 3
     # API_TOKEN (Daytona org Bearer token) is read from a Kubernetes secret — not from env below.
     # Defaults to the same secret as region registration: {fullname}-daytona-api-key (key from registration.secretKeys.apiKey),
     # or registration.existingSecret when set. Override with apiTokenSecret if needed.

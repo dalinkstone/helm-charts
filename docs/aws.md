@@ -41,7 +41,27 @@ You will be prompted for (defaults shown in `[brackets]`):
 | AWS region | `us-east-1` | |
 | S3 bucket name | `<cluster>-snapshots` | Globally unique |
 | Runner credential mode | `static` | `static` (recommended for v1) or `irsa` |
-| Runner image tag | `v0.183.0` | Default matches chart appVersion |
+| Daytona image profile | `parity` | `parity` or the explicit `v0.199-canary` |
+
+Daytona component images are not prompted independently. The chart pins the
+Docker-Hub-verified parity bundle
+`v0.184.0-k8s-oss.3-amd64` for proxy, runner/embedded daemon,
+snapshot-manager, SSH gateway, and runner-manager.
+
+To test against the v0.199 control plane, first create the private runner image:
+
+```bash
+RUNNER_BINARY=/secure/path/runner-amd64 \
+IMAGE_REF=<account>.dkr.ecr.<region>.amazonaws.com/daytona-runner:v0.199.0-byoc-amd64 \
+PUSH=true AWS_REGION=<region> \
+bash scripts/aws-setup/build-runner-image.sh
+```
+
+Then choose `v0.199-canary` in `up.sh` and enter that full image reference. The
+profile is intentionally mixed: private v0.199 runner plus its embedded
+sandbox daemon/toolbox; public v0.189 proxy, snapshot-manager, and SSH gateway;
+and public v0.184 runner-manager. It is a controlled compatibility test, not a
+vendor-supported production declaration.
 
 The script saves your answers to `scripts/aws-setup/.state/prompts.env` so a re-run reuses them.
 It also selects an EKS node instance type that satisfies the script's minimum
@@ -50,7 +70,7 @@ vCPU requirement and your regional quota, unless you override it with
 
 ## What the script does (step by step)
 
-1. **EKS cluster** via `eksctl` with `iam.withOIDC: true` and a managed sandbox node group labeled `daytona-sandbox-c=true` + tainted `sandbox=true:NoSchedule` on **Ubuntu 24.04** (`amiFamily: Ubuntu2404`). The node group starts with two nodes, keeps a minimum of two, and allows scale-out to four. ~15 min. After cluster create, an explicit `omc::verify_node_ubuntu "24.04"` gate fails-fast if any sandbox node is on a different Ubuntu version — no exceptions, no override flag.
+1. **EKS cluster** via `eksctl` with `iam.withOIDC: true` and a managed sandbox node group labeled `daytona-sandbox-c=true` + tainted `sandbox=true:NoSchedule` on **Ubuntu 24.04** (`amiFamily: Ubuntu2404`). The node group starts with two nodes, keeps a minimum of two, allows scale-out to four, carries Cluster Autoscaler discovery/IAM configuration, and defaults to a 250 GiB root volume. The setup does not install the autoscaler controller. ~15 min. After cluster create, an explicit `omc::verify_node_ubuntu "24.04"` gate fails-fast if any sandbox node is on a different Ubuntu version — no exceptions, no override flag.
 2. **S3 bucket** with public access blocked by default.
 3. **IAM**: either an IAM user with access keys (static mode) OR an IAM role with an IRSA trust policy bound to the runner ServiceAccount (irsa mode). The minimum S3 policy is attached either way.
 4. **kubeconfig** via `aws eks update-kubeconfig`.
@@ -101,6 +121,19 @@ bash scripts/aws-setup/e2e.sh
 ```
 
 This uses the SDK smoke test — it creates+deletes sandboxes via the public API.
+
+For the customer failure mode, keep one newly created sandbox running and run:
+
+```bash
+SANDBOX_CONTAINER=<docker-container-id-or-name> \
+ITERATIONS=300 INTERVAL_SECONDS=2 \
+bash scripts/aws-setup/network-smoke.sh
+```
+
+The diagnostic records the deployed bundle, stale `SBX_*` iptables jumps,
+runner-to-toolbox TCP connectivity on port 2280, sandbox DNS, direct-IP egress,
+Docker events, kernel network messages, and conntrack usage. Reports are stored
+under `scripts/aws-setup/.state/`.
 
 ## Teardown
 

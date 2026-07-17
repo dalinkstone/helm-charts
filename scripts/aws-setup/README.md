@@ -199,10 +199,24 @@ export AWS_PROFILE=my-profile
 
 # Single interactive entrypoint: prompts for cluster name, base domain,
 # region name, Daytona API URL + key, AWS region, S3 bucket, and credential
-# mode (static IAM keys vs IRSA). Re-runnable if interrupted; state lives
-# in .state/.
+# mode (static IAM keys vs IRSA), and image profile. Re-runnable if interrupted;
+# state lives in .state/.
 ./up.sh
 ```
+
+The default `parity` image profile uses the complete public v0.184 bundle. For
+a v0.199 control-plane canary, first build and push the private runner image:
+
+```bash
+RUNNER_BINARY=/secure/path/runner-amd64 \
+IMAGE_REF=<account>.dkr.ecr.<region>.amazonaws.com/daytona-runner:v0.199.0-byoc-amd64 \
+PUSH=true AWS_REGION=<region> \
+./build-runner-image.sh
+```
+
+Choose `v0.199-canary` when `up.sh` asks for the image profile and provide the
+full ECR image reference. The builder verifies that the runner extracts both
+the sandbox toolbox daemon and computer-use binary before it can be pushed.
 
 `up.sh` will, in order: create the EKS cluster (with OIDC) and a sandbox node
 pool labelled `daytona-sandbox-c=true` + tainted `sandbox=true:NoSchedule`;
@@ -221,6 +235,10 @@ kubectl -n daytona get pods
 
 # SDK smoke test: daytona.create(target=<region>) then code_run("...")
 ./e2e.sh
+
+# With one new sandbox still running, repeatedly test toolbox:2280, DNS, and
+# direct-IP egress. Set SANDBOX_CONTAINER when more than one is running.
+ITERATIONS=300 INTERVAL_SECONDS=2 ./network-smoke.sh
 
 # Tear everything down (also deregisters the region from Daytona Cloud)
 ./teardown.sh
@@ -243,6 +261,9 @@ aws-setup/
 │                                  # bucket so the declarative builder works.
 ├── e2e.sh                         # SDK test: daytona.create(target=region)
 │                                  # then code_run("print('Hello World')").
+├── build-runner-image.sh          # build/verify private runner + embedded
+│                                  # sandbox daemon/toolbox; optional ECR push.
+├── network-smoke.sh               # repeated toolbox/DNS/egress diagnostics.
 ├── .state/                        # generated at runtime (region-id, names,
 │                                  # IAM keys, rendered manifests). gitignored.
 └── .legacy/                       # RETIRED EC2-on-systemd setup. Not a
@@ -318,10 +339,17 @@ more to track and tear down.
 - **Single sandbox node pool, public subnets.** This setup provisions one
   node group in public subnets. Real fleets want sandbox nodes spread across
   multiple AZs and, typically, private subnets with tightened security groups.
-- **No node-pool autoscaler.** The sandbox node pool is a fixed size. A
-  production region usually pairs the DaemonSet with the Cluster Autoscaler or
-  Karpenter so new sandbox nodes (and therefore new runner pods) come up under
-  load.
+- **Cluster Autoscaler controller not installed.** The sandbox node group is
+  created with node-role autoscaler IAM access and explicit ASG discovery tags,
+  but this script does not install the controller. If Cluster Autoscaler is
+  installed separately, prefer a dedicated IRSA/Pod Identity role, configure
+  ASG auto-discovery for this cluster, tolerate `sandbox=true:NoSchedule` if it
+  runs on this node group, and keep its minor version aligned with EKS. The node
+  group can then scale from two to four nodes.
+- **Node root volume defaults to 250 GiB.** Override
+  `AWS_NODE_VOLUME_SIZE_GB` before the first run when a different size is
+  required. Existing EKS node group volumes are not resized by rerunning this
+  script.
 
 ## When you've finished running it
 

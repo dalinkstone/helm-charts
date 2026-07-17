@@ -4,6 +4,88 @@ This guide collects the operational knobs that are shared across AWS, Azure,
 and GCP BYOC regions. All settings live under `charts/daytona-region` values and
 are disabled by default unless a cloud setup template opts into them.
 
+## Recovering Stale Runner-Manager State
+
+Runner-manager persists provider lifecycle records in a Kubernetes ConfigMap.
+Restarting its Deployment is safe, but it does not remove those records. Do not
+delete the ConfigMap: it can contain healthy runner records as well as stale
+ones.
+
+The manager image selected by the current chart exposes authenticated list,
+get, and per-runner delete operations on its local API. This is a break-glass
+recovery path. Use it only after the desired-state deployment has been upgraded
+from the older `v0.158.4` manager and `services.runnermanager.apiKeySecret.name`
+points to an explicitly managed secret. Do not rely on an image-baked default
+API key.
+
+Confirm the Deployment gets `API_KEY` from a Secret. Stop if this prints an
+empty value:
+
+```bash
+kubectl -n <namespace> get deploy <runner-manager-deployment> \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="runnermanager")].env[?(@.name=="API_KEY")].valueFrom.secretKeyRef.name}{"\n"}'
+```
+
+List the manager's provider records without exposing its API key:
+
+```bash
+kubectl -n <namespace> exec deploy/<runner-manager-deployment> \
+  -c runnermanager -- sh -ceu '
+    curl -fsS \
+      -H "X-Daytona-Authorization: Bearer ${API_KEY}" \
+      "http://127.0.0.1:${API_PORT}/runners"
+  ' | jq 'if type == "array" then map({id: (.id // .ID), state: (.state // .State), error: (.error // .Error)}) else error("unexpected response shape") end'
+```
+
+For each record stuck in `initializing`, confirm all of the following before
+removing it:
+
+1. It has remained stuck longer than `POD_WAIT_TIMEOUT`.
+2. No Pod exists for its runner ID. Check the known ID label and inspect every
+   remaining non-DaemonSet runner Pod; absence from one label query is not
+   sufficient proof.
+3. Daytona has no sandbox, including errored or deleted sandboxes, referencing
+   that runner ID. The sandbox list is eventually consistent, so check more
+   than once and follow every pagination cursor.
+
+```bash
+kubectl -n <namespace> get pods \
+  -l daytona.io/runner-id=<runner-id> \
+  -o wide
+
+kubectl -n <namespace> get pods \
+  -o custom-columns='NAME:.metadata.name,OWNER:.metadata.ownerReferences[0].kind,OWNER_NAME:.metadata.ownerReferences[0].name,LABELS:.metadata.labels'
+```
+
+After those checks have been independently reviewed, delete only that provider
+record through runner-manager. This operation can also remove provider and
+Daytona runner resources, so it is intentionally not automated by the chart:
+
+```bash
+kubectl -n <namespace> exec deploy/<runner-manager-deployment> \
+  -c runnermanager -- sh -ceu '
+    runner_id="$1"
+    curl -fsS -X DELETE \
+      -H "X-Daytona-Authorization: Bearer ${API_KEY}" \
+      "http://127.0.0.1:${API_PORT}/runners/${runner_id}"
+  ' -- '<runner-id>'
+```
+
+Runner-manager should then observe capacity below `MIN_RUNNERS`, create a new
+Pod, and move the replacement from `initializing` to `ready`. If the endpoint
+returns `404`, the deployed image is too old or the record is already absent;
+do not fall back to editing the ConfigMap directly.
+
+```bash
+kubectl -n <namespace> logs \
+  deploy/<runner-manager-deployment> \
+  --since=15m -f
+
+kubectl -n <namespace> get pods \
+  -l daytona.io/runner-id \
+  -w
+```
+
 ## Runner Reaper
 
 In BYOC, Daytona Cloud owns runner state while the runner pods live in your
@@ -36,6 +118,11 @@ kubectl -n daytona create job --from=cronjob/<release>-runner-reaper reaper-now
 A sandbox without a completed backup on a hard-killed node is not recoverable;
 the reaper can clean up the stale runner and move only sandboxes Daytona can
 restore.
+
+Any failed scheduling, draining, or deletion API operation makes the reaper Job
+fail. This prevents a partial cleanup from being reported as successful. The
+reaper does not act on `initializing` records; those require the safety checks
+above.
 
 ## Sandbox Network Security And DNS
 

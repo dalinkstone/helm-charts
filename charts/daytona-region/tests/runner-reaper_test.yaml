@@ -78,3 +78,12 @@ tests:
           content:
             name: DRY_RUN
             value: "false"
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command[2]
+          pattern: 'failures=0'
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command[2]
+          pattern: 'runner-reaper: \$\{failures\} API operation\(s\) failed'
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command[2]
+          pattern: 'cs="\$\(http PATCH .*scheduling'

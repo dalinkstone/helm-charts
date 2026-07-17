@@ -260,7 +260,20 @@ The registry's s3 driver (distribution v3) resumes blob uploads via `ListMultipa
 
 ## runnermanager ImagePullBackOff
 
-Not every chart `appVersion` has a published `daytonaio/daytona-runner-manager` tag (the tag lines are sparse: plain, `-k8s-oss`, `-byoc` flavors). Keep the chart's pinned default tag unless you have verified the override exists on Docker Hub.
+The chart defaults every version-coupled Daytona image to its `appVersion`,
+currently `v0.184.0-k8s-oss.3-amd64`. Docker Hub publishes that exact tag for
+proxy, runner (including its embedded sandbox daemon), snapshot-manager,
+ssh-gateway, and runner-manager. Do not override a single component in
+isolation. Plain `v0.184.0-amd64` and `v0.189.0-amd64` are incomplete bundles
+because no runner-manager image is published under those exact tags.
+
+For the v0.199 control-plane canary, build a private runner image with
+`scripts/aws-setup/build-runner-image.sh`, then select the AWS setup profile
+`v0.199-canary`. The profile deliberately opts into a named mixed bundle and
+uses the verified private runner image. An arbitrary one-component override is
+still rejected. After deployment, run `scripts/aws-setup/network-smoke.sh`
+against a newly created sandbox to exercise toolbox port 2280, DNS, and
+direct-IP egress repeatedly.
 
 ## Runner DaemonSet pod stuck `Pending` — `didn't have free ports`
 

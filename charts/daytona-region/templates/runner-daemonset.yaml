@@ -23,8 +23,10 @@ spec:
       maxUnavailable: 1
   template:
     metadata:
-      {{- with .Values.services.runner.podAnnotations }}
       annotations:
+        {{- include "daytona.imageBundleAnnotations" . | nindent 8 }}
+        daytona.io/image-version: {{ .Values.services.runner.image.tag | default .Chart.AppVersion | quote }}
+      {{- with .Values.services.runner.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:

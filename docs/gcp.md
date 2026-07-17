@@ -42,7 +42,11 @@ Prompts:
 | GCP project ID | — | no default; must prompt |
 | GCP region | `us-central1` | |
 | GCS bucket name | `<cluster>-snapshots` | Globally unique |
-| Runner image tag | `v0.183.0` | Default matches chart appVersion |
+
+Daytona component images are not prompted independently. The chart pins the
+Docker-Hub-verified parity bundle
+`v0.184.0-k8s-oss.3-amd64` for proxy, runner/embedded daemon,
+snapshot-manager, SSH gateway, and runner-manager.
 
 The script selects a GKE machine type that fits the regional node footprint and
 your quota, unless you override it with `OMC_INSTANCE_TYPE`.

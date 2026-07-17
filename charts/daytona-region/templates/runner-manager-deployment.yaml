@@ -21,8 +21,10 @@ spec:
       app.kubernetes.io/component: runnermanager
   template:
     metadata:
-      {{- with .Values.services.runnermanager.podAnnotations }}
       annotations:
+        {{- include "daytona.imageBundleAnnotations" . | nindent 8 }}
+        daytona.io/image-version: {{ .Values.services.runnermanager.image.tag | default .Chart.AppVersion | quote }}
+      {{- with .Values.services.runnermanager.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
@@ -44,8 +46,35 @@ spec:
           imagePullPolicy: {{ .Values.services.runnermanager.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: 3010
+              containerPort: {{ .Values.services.runnermanager.env.API_PORT | default "3010" }}
               protocol: TCP
+          {{- if .Values.services.runnermanager.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.services.runnermanager.startupProbe.path | default "/health" }}
+              port: http
+            periodSeconds: {{ .Values.services.runnermanager.startupProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ .Values.services.runnermanager.startupProbe.timeoutSeconds | default 2 }}
+            failureThreshold: {{ .Values.services.runnermanager.startupProbe.failureThreshold | default 30 }}
+          {{- end }}
+          {{- if .Values.services.runnermanager.readinessProbe.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.services.runnermanager.readinessProbe.path | default "/health" }}
+              port: http
+            periodSeconds: {{ .Values.services.runnermanager.readinessProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ .Values.services.runnermanager.readinessProbe.timeoutSeconds | default 2 }}
+            failureThreshold: {{ .Values.services.runnermanager.readinessProbe.failureThreshold | default 3 }}
+          {{- end }}
+          {{- if .Values.services.runnermanager.livenessProbe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.services.runnermanager.livenessProbe.path | default "/health" }}
+              port: http
+            periodSeconds: {{ .Values.services.runnermanager.livenessProbe.periodSeconds | default 30 }}
+            timeoutSeconds: {{ .Values.services.runnermanager.livenessProbe.timeoutSeconds | default 2 }}
+            failureThreshold: {{ .Values.services.runnermanager.livenessProbe.failureThreshold | default 3 }}
+          {{- end }}
           env:
             - name: API_PORT
               value: {{ .Values.services.runnermanager.env.API_PORT | default "3010" | quote }}

@@ -48,8 +48,8 @@ if [[ -f "$PROMPTS_FILE" ]]; then
   set +a
 else
   unset CLUSTER_NAME BASE_DOMAIN REGION_NAME CLUSTER_ISSUER_EMAIL DAYTONA_API_URL \
-        AWS_REGION S3_BUCKET RUNNER_AWS_CREDENTIAL_MODE RUNNER_IMAGE_TAG \
-        AWS_NODE_VM_SIZE
+        AWS_REGION S3_BUCKET RUNNER_AWS_CREDENTIAL_MODE \
+        AWS_NODE_VM_SIZE AWS_NODE_VOLUME_SIZE_GB DAYTONA_IMAGE_PROFILE RUNNER_IMAGE_REF
 fi
 
 # === 1. Interactive prompts ==================================================
@@ -68,11 +68,52 @@ omc::prompt_secret DAYTONA_API_KEY "Daytona Cloud admin API key"
 omc::prompt AWS_REGION   "AWS region" "us-east-1"
 omc::prompt S3_BUCKET    "S3 bucket name (snapshots + build context)" "${CLUSTER_NAME}-snapshots"
 omc::prompt RUNNER_AWS_CREDENTIAL_MODE "Runner credential mode (static or irsa)" "static"
-omc::prompt RUNNER_IMAGE_TAG "Runner image tag" "v0.183.0"
+omc::prompt DAYTONA_IMAGE_PROFILE "Daytona image profile (parity or v0.199-canary)" "parity"
+omc::prompt AWS_NODE_VOLUME_SIZE_GB "Sandbox node root volume size in GiB" "250"
 
 if [[ "$RUNNER_AWS_CREDENTIAL_MODE" != "static" && "$RUNNER_AWS_CREDENTIAL_MODE" != "irsa" ]]; then
   omc::die "RUNNER_AWS_CREDENTIAL_MODE must be 'static' or 'irsa' (got: $RUNNER_AWS_CREDENTIAL_MODE)"
 fi
+if [[ ! "$AWS_NODE_VOLUME_SIZE_GB" =~ ^[0-9]+$ ]] || (( AWS_NODE_VOLUME_SIZE_GB < 100 )); then
+  omc::die "AWS_NODE_VOLUME_SIZE_GB must be an integer >= 100 (got: $AWS_NODE_VOLUME_SIZE_GB)"
+fi
+
+# A private v0.199 runner also supplies the embedded sandbox daemon/toolbox.
+# The remaining tags are the newest public combination selected for this
+# controlled compatibility canary; this is not a claim of vendor support.
+DAYTONA_IMAGE_BUNDLE_NAME=""
+DAYTONA_ALLOW_VERSION_SKEW=false
+DAYTONA_PROXY_IMAGE_TAG=""
+DAYTONA_SNAPSHOT_MANAGER_IMAGE_TAG=""
+DAYTONA_SSH_GATEWAY_IMAGE_TAG=""
+DAYTONA_RUNNER_MANAGER_IMAGE_TAG=""
+RUNNER_IMAGE_REGISTRY="docker.io"
+RUNNER_IMAGE_REPOSITORY="daytonaio/daytona-runner"
+RUNNER_IMAGE_TAG=""
+case "$DAYTONA_IMAGE_PROFILE" in
+  parity)
+    ;;
+  v0.199-canary)
+    omc::prompt RUNNER_IMAGE_REF \
+      "Private v0.199 runner image (registry/repository:tag)" \
+      "${RUNNER_IMAGE_REF:-}"
+    [[ "$RUNNER_IMAGE_REF" == */*:* ]] \
+      || omc::die "RUNNER_IMAGE_REF must be registry/repository:tag (got: $RUNNER_IMAGE_REF)"
+    RUNNER_IMAGE_REGISTRY="${RUNNER_IMAGE_REF%%/*}"
+    runner_image_path="${RUNNER_IMAGE_REF#*/}"
+    RUNNER_IMAGE_REPOSITORY="${runner_image_path%:*}"
+    RUNNER_IMAGE_TAG="${runner_image_path##*:}"
+    DAYTONA_IMAGE_BUNDLE_NAME="control-v0.199-runner-canary"
+    DAYTONA_ALLOW_VERSION_SKEW=true
+    DAYTONA_PROXY_IMAGE_TAG="v0.189.0-amd64"
+    DAYTONA_SNAPSHOT_MANAGER_IMAGE_TAG="v0.189.0-amd64"
+    DAYTONA_SSH_GATEWAY_IMAGE_TAG="v0.189.0-amd64"
+    DAYTONA_RUNNER_MANAGER_IMAGE_TAG="v0.184.0-k8s-oss.3-amd64"
+    ;;
+  *)
+    omc::die "DAYTONA_IMAGE_PROFILE must be 'parity' or 'v0.199-canary' (got: $DAYTONA_IMAGE_PROFILE)"
+    ;;
+esac
 
 # Persist prompts so re-runs reuse them.
 {
@@ -84,7 +125,9 @@ fi
   printf 'export AWS_REGION=%q\n'   "$AWS_REGION"
   printf 'export S3_BUCKET=%q\n'    "$S3_BUCKET"
   printf 'export RUNNER_AWS_CREDENTIAL_MODE=%q\n' "$RUNNER_AWS_CREDENTIAL_MODE"
-  printf 'export RUNNER_IMAGE_TAG=%q\n' "$RUNNER_IMAGE_TAG"
+  printf 'export AWS_NODE_VOLUME_SIZE_GB=%q\n' "$AWS_NODE_VOLUME_SIZE_GB"
+  printf 'export DAYTONA_IMAGE_PROFILE=%q\n' "$DAYTONA_IMAGE_PROFILE"
+  printf 'export RUNNER_IMAGE_REF=%q\n' "${RUNNER_IMAGE_REF:-}"
 } > "$PROMPTS_FILE"
 chmod 600 "$PROMPTS_FILE"
 omc::log INFO "Prompts saved: $PROMPTS_FILE"
@@ -135,13 +178,24 @@ managedNodeGroups:
     maxSize: 4
     instanceType: ${AWS_NODE_VM_SIZE}
     amiFamily: Ubuntu2404
+    # The addon policy supports a controller that uses the node role. Production
+    # deployments should give Cluster Autoscaler a dedicated IRSA/Pod Identity
+    # role with tag-scoped write permissions instead.
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+    # Cluster Autoscaler ASG auto-discovery requires both tags. Keep these even
+    # when the controller uses a dedicated identity.
+    tags:
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/${CLUSTER_NAME}: "owned"
     labels:
       daytona-sandbox-c: "true"
     taints:
       - key: sandbox
         value: "true"
         effect: NoSchedule
-    volumeSize: 100
+    volumeSize: ${AWS_NODE_VOLUME_SIZE_GB}
 EOF
   omc::log INFO "Creating EKS cluster (this takes 15-20 min)..."
   eksctl create cluster -f "$CLUSTER_CONFIG"
@@ -340,8 +394,12 @@ fi
 omc::log INFO "=== Step 9/10: helm install daytona-region ==="
 omc::ssh_keys_ensure "$STATE_DIR"
 export CLUSTER_NAME BASE_DOMAIN REGION_NAME DAYTONA_API_URL DAYTONA_API_KEY \
-       AWS_REGION S3_BUCKET RUNNER_AWS_CREDENTIAL_MODE RUNNER_IMAGE_TAG \
-       IAM_ACCESS_KEY IAM_SECRET_KEY IRSA_ROLE_ARN INTERNAL_REGISTRY_HOST=""
+       AWS_REGION S3_BUCKET RUNNER_AWS_CREDENTIAL_MODE \
+       IAM_ACCESS_KEY IAM_SECRET_KEY IRSA_ROLE_ARN INTERNAL_REGISTRY_HOST="" \
+       DAYTONA_IMAGE_BUNDLE_NAME DAYTONA_ALLOW_VERSION_SKEW \
+       DAYTONA_PROXY_IMAGE_TAG DAYTONA_SNAPSHOT_MANAGER_IMAGE_TAG \
+       DAYTONA_SSH_GATEWAY_IMAGE_TAG DAYTONA_RUNNER_MANAGER_IMAGE_TAG \
+       RUNNER_IMAGE_REGISTRY RUNNER_IMAGE_REPOSITORY RUNNER_IMAGE_TAG
 omc::render_template "$SCRIPT_DIR/values-region.yaml.tmpl" "$VALUES_OUT"
 omc::helm_install_wait daytona-region "$SCRIPT_DIR/../../charts/daytona-region" daytona "$VALUES_OUT"
 
@@ -359,13 +417,16 @@ cat >&2 <<EOF
 ==================== BRING-UP COMPLETE ====================
 Proxy URL:         https://proxy.${BASE_DOMAIN}
 Snapshot manager:  https://snapshots.${BASE_DOMAIN}
+Image profile:     ${DAYTONA_IMAGE_PROFILE}
+Runner image:      ${RUNNER_IMAGE_REGISTRY}/${RUNNER_IMAGE_REPOSITORY}:${RUNNER_IMAGE_TAG:-<chart-appVersion>}
 
 Next steps:
   1. Open the Daytona Cloud dashboard for ${REGION_NAME}
   2. Verify the runner is registered: kubectl -n daytona get pods
   3. Create a snapshot in this region, then a sandbox from it (web UI or API)
   4. Run the SDK smoke test:    bash $SCRIPT_DIR/e2e.sh
-  5. Teardown when done:         bash $SCRIPT_DIR/teardown.sh
+  5. Run network diagnostics:   bash $SCRIPT_DIR/network-smoke.sh
+  6. Teardown when done:        bash $SCRIPT_DIR/teardown.sh
 
 Future manual upgrades MUST pass both values files or SSH breaks:
   helm upgrade daytona-region charts/daytona-region -n daytona \\
