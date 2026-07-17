@@ -151,9 +151,11 @@ These surface during a real deployment.
    `<release>-daytona-region-region-config` secret out from under the chart.
 
 6. **`helm uninstall` does NOT clean up Daytona Cloud state.** The region you
-   registered (and any runners) stay in Daytona Cloud's database. You have to
-   call the API or visit the dashboard. The [`teardown.sh`](./teardown.sh)
-   script in this directory handles deregistration as part of cleanup.
+   registered (and any runners) stay in Daytona Cloud's database. Use
+   [`teardown.sh`](./teardown.sh), which deregisters matching runners/region,
+   removes the exact Cloudflare records and Stage-C test resources this flow
+   created, and then removes EKS/S3/IAM. It deliberately preserves the
+   user-provided v0.199 runner image repository.
 
 ## Capacity sizing
 
@@ -185,6 +187,60 @@ is enough.
 | CLIs installed locally | `aws`, `eksctl`, `kubectl`, `helm`, `envsubst`, `yq`, `jq` |
 
 ## How to run
+
+### Unattended canary (recommended)
+
+The supported canary path is one command after filling a non-secret config
+file. Credentials stay in the environment and are never written to that file:
+
+```bash
+mkdir -p scripts/aws-setup/.state
+cp scripts/aws-setup/canary.env.example scripts/aws-setup/.state/canary.env
+$EDITOR scripts/aws-setup/.state/canary.env
+
+bash scripts/aws-setup/deploy-and-test.sh
+```
+
+`deploy-and-test.sh` requires an exact clean `EXPECTED_COMMIT`, checks the AWS
+account/principal/region/session expiration/quota and external APIs, runs Helm
+unit tests plus all four static checks and `helm lint`, verifies or builds the
+v0.199 runner image (an existing ECR tag must match the configured immutable
+digest), writes `.state/prompts.env` mode 0600, deploys, and runs:
+
+- `infra-test.sh` (nodes, taints, rollouts, TLS, image bundle, Daytona region
+  and runner state, and live S3 wiring);
+- `e2e.sh` stages A/B/C (Stage C uses the configured Daytona org id); and
+- `network-e2e.sh`, which creates a distinct sandbox, runs
+  `network-smoke.sh`, and deletes that sandbox in a `finally` block.
+
+Evidence is preserved under `.state/` with mode 0600. The orchestrator never
+runs teardown; the cluster remains available until an operator explicitly runs
+`teardown.sh`.
+
+From devflow, use a dedicated expiring deployment profile and forward only the
+two required API tokens (plus `DAYTONA_ORG_ID` if you keep it outside the
+non-secret config):
+
+```bash
+devflow up dalinkstone/helm-charts \
+  --agent codex \
+  --branch codex/daytona-v0199-canary \
+  --name dv-daytona-v0199 \
+  --size large \
+  --aws-profile devflow-deployer \
+  --secret-env DAYTONA_API_KEY \
+  --secret-env CLOUDFLARE_API_TOKEN \
+  --task "Verify the reviewed HEAD and clean worktree, fill the canary config, run scripts/aws-setup/deploy-and-test.sh, preserve receipts, and do not teardown."
+```
+
+The AWS deployment profile must be an expiring STS/Identity Center session with
+at least three hours remaining at preflight; 4–8 hours is recommended for EKS
+creation and all tests. The chart's `static` runner credential mode creates a
+separate scoped IAM user for the runtime until upstream runner IRSA support is
+functional; it does not turn the forwarded deployment session into a static
+credential.
+
+### Interactive bring-up
 
 ```bash
 cd scripts/aws-setup
@@ -236,9 +292,12 @@ kubectl -n daytona get pods
 # SDK smoke test: daytona.create(target=<region>) then code_run("...")
 ./e2e.sh
 
-# With one new sandbox still running, repeatedly test toolbox:2280, DNS, and
-# direct-IP egress. Set SANDBOX_CONTAINER when more than one is running.
-ITERATIONS=300 INTERVAL_SECONDS=2 ./network-smoke.sh
+# Explicit live infrastructure assertions and receipt
+./infra-test.sh
+
+# Create a dedicated sandbox, repeatedly test toolbox:2280, DNS, and direct-IP
+# egress, then delete that sandbox even if the smoke test fails.
+ITERATIONS=300 INTERVAL_SECONDS=2 ./network-e2e.sh
 
 # Tear everything down (also deregisters the region from Daytona Cloud)
 ./teardown.sh
@@ -261,6 +320,13 @@ aws-setup/
 │                                  # bucket so the declarative builder works.
 ├── e2e.sh                         # SDK test: daytona.create(target=region)
 │                                  # then code_run("print('Hello World')").
+├── preflight.sh                   # expected AWS identity, expiring session,
+│                                  # quota and external API safety checks.
+├── infra-test.sh                  # runnable live infra assertions + receipt.
+├── deploy-and-test.sh             # unattended static → deploy → live tests.
+├── canary.env.example             # non-secret unattended config template.
+├── network-e2e.sh                 # dedicated sandbox lifecycle wrapper for
+│                                  # network-smoke.sh.
 ├── build-runner-image.sh          # build/verify private runner + embedded
 │                                  # sandbox daemon/toolbox; optional ECR push.
 ├── network-smoke.sh               # repeated toolbox/DNS/egress diagnostics.

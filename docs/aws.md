@@ -23,6 +23,24 @@ DNS: a base domain you control (e.g. `byoc.example.com`). The script will print 
 
 ## Run
 
+For the v0.199 canary, prefer the unattended reviewed-commit workflow:
+
+```bash
+mkdir -p scripts/aws-setup/.state
+cp scripts/aws-setup/canary.env.example scripts/aws-setup/.state/canary.env
+$EDITOR scripts/aws-setup/.state/canary.env
+bash scripts/aws-setup/deploy-and-test.sh
+```
+
+It validates the expected AWS account and expiring session, executes all static
+and Helm gates, writes prompt state mode 0600, deploys, runs live infrastructure
+assertions plus SDK A/B/C and a dedicated network-smoke sandbox, and preserves
+receipts without tearing down the environment. Credentials must arrive through
+the environment (for example devflow `--aws-profile` and `--secret-env`), never
+through the config file.
+
+For an interactive bring-up:
+
 ```bash
 cd <helm-charts repo root>
 bash scripts/aws-setup/up.sh

@@ -56,6 +56,8 @@ STATE_DIR="$SCRIPT_DIR/.state"
 # deployed region straight from the chart values so e2e always targets what is
 # actually running; fall back to saved up.sh state / env without a cluster.
 for _pe in "$STATE_DIR/prompts.env" "$SCRIPT_DIR/../.state/prompts.env"; do
+  # Runtime-generated prompt state; the dynamic path is intentional.
+  # shellcheck disable=SC1090
   [[ -f "$_pe" ]] && { set -a; . "$_pe"; set +a; break; }
 done
 if command -v helm >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -135,13 +137,24 @@ s3_object_count() {
 S3_BEFORE_STAGE_B="$(s3_object_count "$S3_BUCKET")"
 
 command -v python3 >/dev/null 2>&1 || { echo "python3 not installed"; exit 1; }
-python3 -c "import daytona" 2>/dev/null || {
-  echo "Installing daytona SDK (pip install 'daytona==0.183.*')..."
-  python3 -m pip install --quiet --user "daytona==0.183.*" || {
-    echo "failed to install daytona SDK; try: pip install 'daytona==0.183.*'"
+PYTHON_BIN=python3
+if "$PYTHON_BIN" -c "import daytona" 2>/dev/null; then
+  :
+elif [[ -x "$STATE_DIR/.venv/bin/python" ]] \
+  && "$STATE_DIR/.venv/bin/python" -c "import daytona" 2>/dev/null; then
+  PYTHON_BIN="$STATE_DIR/.venv/bin/python"
+else
+  echo "Installing daytona SDK into .state/.venv (daytona==0.183.*)..."
+  python3 -m venv "$STATE_DIR/.venv" || {
+    echo "failed to create Python venv; install python3-venv"
     exit 1
   }
-}
+  PYTHON_BIN="$STATE_DIR/.venv/bin/python"
+  "$STATE_DIR/.venv/bin/pip" install --quiet "daytona==0.183.*" || {
+    echo "failed to install daytona SDK in $STATE_DIR/.venv"
+    exit 1
+  }
+fi
 
 # Self-contained python file so we can apply the urllib3 monkey-patch (for LE
 # staging certs) BEFORE importing the daytona SDK.
@@ -618,4 +631,4 @@ S3_BEFORE_STAGE_B="$S3_BEFORE_STAGE_B" \
 ECR_TEST_IMAGE="$ECR_TEST_IMAGE" \
 ECR_PULLER_ROLE_ARN="$ECR_PULLER_ROLE_ARN" \
 DAYTONA_REGISTRY_ID="$DAYTONA_REGISTRY_ID" \
-  python3 /tmp/byoc-aws-e2e.py
+  "$PYTHON_BIN" /tmp/byoc-aws-e2e.py

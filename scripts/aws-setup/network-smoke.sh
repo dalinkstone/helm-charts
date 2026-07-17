@@ -114,12 +114,17 @@ selected_pod=""
 selected_id=""
 for row in "${container_rows[@]}"; do
   IFS=$'\t' read -r pod cid cname _ <<<"$row"
-  if [[ "$cid" == "$SANDBOX_CONTAINER"* || "$cname" == "$SANDBOX_CONTAINER" ]]; then
+  if [[ "$cid" == "$SANDBOX_CONTAINER"* || "$cname" == *"$SANDBOX_CONTAINER"* ]]; then
     selected_pod="$pod"
     selected_id="$cid"
     break
   fi
 done
+if [[ -z "$selected_id" && "${#container_rows[@]}" -eq 1 ]]; then
+  selected_pod="$(printf '%s' "${container_rows[0]}" | cut -f1)"
+  selected_id="$(printf '%s' "${container_rows[0]}" | cut -f2)"
+  echo "Requested sandbox name was not present in the Docker name; selected the only running container: $selected_id"
+fi
 [[ -n "$selected_id" ]] || { echo "ERROR: sandbox container not found: $SANDBOX_CONTAINER"; exit 1; }
 
 sandbox_ip="$(host_exec "$selected_pod" docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$selected_id")"

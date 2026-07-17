@@ -47,9 +47,7 @@ if [[ -f "$PROMPTS_FILE" ]]; then
   . "$PROMPTS_FILE"
   set +a
 else
-  unset CLUSTER_NAME BASE_DOMAIN REGION_NAME CLUSTER_ISSUER_EMAIL DAYTONA_API_URL \
-        AWS_REGION S3_BUCKET RUNNER_AWS_CREDENTIAL_MODE \
-        AWS_NODE_VM_SIZE AWS_NODE_VOLUME_SIZE_GB DAYTONA_IMAGE_PROFILE RUNNER_IMAGE_REF
+  omc::log INFO "No saved prompts found; honoring pre-set environment values and prompting only for missing inputs."
 fi
 
 # === 1. Interactive prompts ==================================================

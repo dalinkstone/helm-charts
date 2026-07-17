@@ -260,18 +260,64 @@ omc::cloudflare_upsert_dns() {
   fi
 }
 
+# omc::cloudflare_zone_id TOKEN DOMAIN
+# Print the nearest Cloudflare zone accessible to TOKEN. BASE_DOMAIN is often a
+# delegated subdomain (for example byoc.example.com) while the Cloudflare zone
+# is its parent (example.com), so an exact-only lookup is not sufficient.
+omc::cloudflare_zone_id() {
+  local token="$1" candidate="$2" zone_id=""
+  while [[ "$candidate" == *.* ]]; do
+    zone_id="$(curl -sS --max-time 30 -H "Authorization: Bearer $token" \
+      "https://api.cloudflare.com/client/v4/zones?name=${candidate}" \
+      | jq -r '.result[0].id // empty')"
+    if [[ -n "$zone_id" ]]; then
+      printf '%s' "$zone_id"
+      return 0
+    fi
+    candidate="${candidate#*.}"
+  done
+  return 1
+}
+
+# omc::cloudflare_delete_dns TOKEN BASE_DOMAIN
+# Delete only the three records created by omc::cloudflare_region_dns.
+omc::cloudflare_delete_dns() {
+  local token="$1" base="$2" zone_id fqdn rec_id
+  zone_id="$(omc::cloudflare_zone_id "$token" "$base" || true)"
+  if [[ -z "$zone_id" ]]; then
+    omc::log WARN "Cloudflare zone for '${base}' not found; routing records were not removed."
+    return 1
+  fi
+  for fqdn in "proxy.${base}" "*.proxy.${base}" "snapshots.${base}"; do
+    while IFS= read -r rec_id; do
+      [[ -n "$rec_id" ]] || continue
+      if curl -sS --max-time 30 -X DELETE \
+        -H "Authorization: Bearer $token" \
+        "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records/${rec_id}" \
+        | jq -e '.success == true' >/dev/null; then
+        omc::log INFO "deleted Cloudflare DNS record ${fqdn}"
+      else
+        omc::log WARN "failed to delete Cloudflare DNS record ${fqdn}"
+      fi
+    done < <(
+      curl -sS --max-time 30 -H "Authorization: Bearer $token" \
+        "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records?name=${fqdn}" \
+        | jq -r '.result[]?.id'
+    )
+  done
+}
+
 # omc::cloudflare_region_dns TOKEN BASE_DOMAIN LB_TARGET
 # Upsert the region's routing records (proxy, *.proxy, snapshots) -> the ingress
 # LoadBalancer. CNAME for an AWS NLB hostname, A for an IP. ALL DNS-only: the
 # proxy carries long websockets + large uploads and the wildcard preview certs
 # come from cert-manager — neither survives Cloudflare's HTTP proxy. Assumes the
-# Cloudflare zone IS the base domain.
+# Cloudflare zone may be the base domain or any accessible parent zone.
 omc::cloudflare_region_dns() {
   local token="$1" base="$2" target="$3"
   local zone_id rtype=CNAME
-  zone_id="$(curl -sS -H "Authorization: Bearer $token" \
-    "https://api.cloudflare.com/client/v4/zones?name=${base}" | jq -r '.result[0].id // empty')"
-  [[ -n "$zone_id" ]] || omc::die "Cloudflare zone '${base}' not found (token lacks access or zone name differs)."
+  zone_id="$(omc::cloudflare_zone_id "$token" "$base" || true)"
+  [[ -n "$zone_id" ]] || omc::die "Cloudflare zone for '${base}' not found (token lacks access to the base or a parent zone)."
   [[ "$target" =~ ^[0-9.]+$ ]] && rtype=A
   omc::log INFO "Upserting Cloudflare DNS in zone ${base} (${rtype} -> ${target})..."
   omc::cloudflare_upsert_dns "$token" "$zone_id" "proxy.${base}"     "$rtype" "$target"
