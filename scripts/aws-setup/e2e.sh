@@ -15,14 +15,13 @@
 #     What this DOES NOT prove: that S3 is correctly wired on both ends, and
 #     does NOT exercise the private-registry auth flow.
 #
-#   STAGE B — DECLARATIVE BUILDER PATH  (S3 wiring)
+#   STAGE B — DECLARATIVE BUILDER PATH  (object-storage wiring)
 #     Image.debian_slim('3.12').pip_install(...)  →  builds an image,
 #     creates a snapshot, then a sandbox from it.
-#     What this proves: the SDK packages a real build context, the canary
-#     harness mirrors that exact archive into regional S3, the runner reads it
-#     with its own AWS_* credentials, `docker build` completes, and the
-#     resulting sandbox contains and executes the expected content. The S3
-#     high-water mark provides hard evidence that the regional bucket was used.
+#     What this proves in native mode: the SDK uploads a real build context to
+#     Daytona's push-access object store, the patched runner obtains matching
+#     short-lived credentials and downloads it, `docker build` completes, and
+#     the resulting sandbox contains and executes the expected content.
 #
 #   STAGE C — PRIVATE ECR PATH  (private-registry auth)
 #     Image.base('<account>.dkr.ecr.<region>.amazonaws.com/...')
@@ -36,6 +35,7 @@
 #   DAYTONA_API_URL, DAYTONA_API_KEY, REGION_NAME
 # Optional:
 #   STAGING            "true" → SDK skips TLS verification (LE staging)
+#   MIRROR_BUILD_CONTEXT=true → explicitly test the legacy regional-S3 mirror
 #   SKIP_STAGE_A       default false
 #   SKIP_STAGE_B       default false
 #   SKIP_STAGE_C       default false
@@ -92,6 +92,7 @@ STAGING="${STAGING:-false}"
 SKIP_STAGE_A="${SKIP_STAGE_A:-false}"
 SKIP_STAGE_B="${SKIP_STAGE_B:-false}"
 SKIP_STAGE_C="${SKIP_STAGE_C:-false}"
+MIRROR_BUILD_CONTEXT="${MIRROR_BUILD_CONTEXT:-false}"
 
 # Pick up extras from prior repro / ecr-setup state (so the user can just
 # run `bash e2e.sh` after those without re-exporting anything).
@@ -220,6 +221,7 @@ region         = os.environ["REGION_NAME"]
 skip_a         = os.environ.get("SKIP_STAGE_A", "false").lower() == "true"
 skip_b         = os.environ.get("SKIP_STAGE_B", "false").lower() == "true"
 skip_c         = os.environ.get("SKIP_STAGE_C", "false").lower() == "true"
+mirror_context = os.environ.get("MIRROR_BUILD_CONTEXT", "false").lower() == "true"
 ecr_image      = os.environ.get("ECR_TEST_IMAGE", "")
 ecr_role_arn   = os.environ.get("ECR_PULLER_ROLE_ARN", "")
 ecr_reg_id     = os.environ.get("DAYTONA_REGISTRY_ID", "")
@@ -333,10 +335,12 @@ elif Image is None or CreateSandboxFromImageParams is None:
     print("  → upgrade the SDK to test the declarative builder: pip install -U 'daytona==0.183.*'")
     results["B"]["status"] = "skipped"
 else:
-    banner("B", "DECLARATIVE BUILDER PATH (S3 wiring)")
-    info("Proves both halves of S3 are wired correctly:")
-    info("  • SDK packages a unique context; canary mirrors it to regional S3")
-    info("  • Runner downloads that context through its AWS_* env vars")
+    banner("B", "DECLARATIVE BUILDER PATH (object-storage wiring)")
+    info("Proves the SDK packages a unique context and the runner downloads it")
+    if mirror_context:
+        info("  - compatibility mode: canary mirrors the context to regional S3")
+    else:
+        info("  - native mode: Daytona push-access storage is used without mirroring")
     info("  • docker build runs to completion on the runner")
     info("")
     info(f"S3 bucket pre-test object count: {s3_before}")
@@ -382,13 +386,9 @@ else:
         observed_s3_peak = [initial_s3_count]
         stop_s3_poll = threading.Event()
 
-        # Daytona Cloud's object-storage push access is organization-global,
-        # while a custom v0.199 runner resolves context hashes through its
-        # regional AWS_* environment. Mirror the SDK's exact archive/key into
-        # that regional bucket before submitting the job. This keeps the test
-        # honest: the runner must fetch and unpack the context from the BYOC
-        # bucket, and the unique file is verified inside the sandbox below.
-        if s3_bucket and declarative_image._context_list:
+        # Native mode deliberately performs no mirror so it validates the
+        # actual SDK -> control-plane object store -> runner path.
+        if mirror_context and s3_bucket and declarative_image._context_list:
             context = declarative_image._context_list[0]
             context_hash = hashlib.md5()
             context_hash.update(context.archive_path.encode("utf-8"))
@@ -452,7 +452,8 @@ else:
                 and observed_s3_peak[0] is not None
                 and observed_s3_peak[0] > initial_s3_count
             )
-            results["B"]["status"] = "pass" if sanity and context_matched and s3_touched else "fail"
+            storage_verified = s3_touched if mirror_context else True
+            results["B"]["status"] = "pass" if sanity and context_matched and storage_verified else "fail"
             results["B"]["evidence"] = {
                 "sandbox_id": sandbox_b.id,
                 "image_recipe": recipe_repr,
@@ -466,6 +467,7 @@ else:
                 "s3_objects_peak": observed_s3_peak[0],
                 "s3_objects_after": s3_after,
                 "s3_touched": s3_touched,
+                "context_mode": "regional-mirror" if mirror_context else "native-push-access",
             }
         else:
             fail(f"verify exit={verify.exit_code}  result={verify.result!r}")
@@ -569,7 +571,7 @@ print("  E2E STAGE RESULTS")
 print("═" * 70)
 glyph = {"pass": "✓ PASS", "fail": "✗ FAIL", "error": "✗ ERROR", "skipped": "- skipped", None: "- not run"}
 print(f"  Stage A (public image)           : {glyph.get(results['A']['status'])}")
-print(f"  Stage B (declarative builder/S3) : {glyph.get(results['B']['status'])}")
+print(f"  Stage B (builder/object storage)  : {glyph.get(results['B']['status'])}")
 print(f"  Stage C (private ECR pull)       : {glyph.get(results['C']['status'])}")
 print()
 
@@ -618,11 +620,10 @@ else:
     print(f"      Conclusion: Run `bash ecr-setup.sh` then re-run e2e.sh to")
     print(f"                  produce live evidence for the private ECR path.")
 
-# Declarative builder / S3 wiring
+# Declarative builder / object-storage wiring
 print()
-print("  Declarative builder / S3 — validates that the declarative image")
-print("  builder uploads build context to S3 and the runner reads it back")
-print("  with its own credentials.")
+print("  Declarative builder / object storage — validates a fresh SDK context")
+print("  upload, runner download, image build, sandbox start, and runtime content.")
 b = results["B"]
 print(f"      Test:       Stage B (declarative builder)")
 if b["status"] == "pass":
@@ -649,16 +650,20 @@ if b["status"] == "pass":
     print(f"                  Cache state: {cache_status}")
     print(f"                  Sandbox runtime echoed verifier output:")
     print(f"                    {e['verify_output']}")
-    print(f"                  S3 bucket {e['s3_bucket']}:")
+    print(f"                  Regional S3 diagnostic {e['s3_bucket']}:")
     print(f"                    objects before stage: {e['s3_objects_before']}")
     print(f"                    peak during upload:   {e['s3_objects_peak']}")
     print(f"                    objects after stage:  {e['s3_objects_after']}")
     print(f"                    observed upload:      {s3_delta}")
-    print(f"      Conclusion: The regional S3 context path works:")
-    print(f"                    • the canary mirrored the SDK context archive")
-    print(f"                      into the region's configured S3 bucket")
-    print(f"                    • the runner read and unpacked that archive via")
-    print(f"                      its AWS_* environment, then built the image")
+    if e.get("context_mode") == "regional-mirror":
+        print(f"      Conclusion: The explicit regional S3 compatibility path works:")
+        print(f"                    - the canary mirrored the SDK context archive")
+        print(f"                    - the runner read it via its AWS_* environment")
+    else:
+        print(f"      Conclusion: The native object-storage path works:")
+        print(f"                    - SDK uploaded the unique context normally")
+        print(f"                    - runner fetched it via Daytona push-access")
+    print(f"                    - the runner unpacked it and built the image")
     print(f"                  See charts/daytona-region/README.md")
     print(f"                  '#declarative-builder-setup-byoc'.")
 else:
@@ -698,6 +703,7 @@ STAGING="$STAGING" \
 SKIP_STAGE_A="$SKIP_STAGE_A" \
 SKIP_STAGE_B="$SKIP_STAGE_B" \
 SKIP_STAGE_C="$SKIP_STAGE_C" \
+MIRROR_BUILD_CONTEXT="$MIRROR_BUILD_CONTEXT" \
 S3_BUCKET="$S3_BUCKET" \
 S3_BEFORE_STAGE_B="$S3_BEFORE_STAGE_B" \
 ECR_TEST_IMAGE="$ECR_TEST_IMAGE" \

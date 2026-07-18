@@ -142,6 +142,26 @@ ready_runners="$(jq --arg id "$region_id" --arg name "$REGION_NAME" '
 (( ready_runners >= 2 )) || omc::die "expected at least two ready Daytona runners for $REGION_NAME; found $ready_runners"
 echo "PASS Daytona registration: region=$region_id ready_runners=$ready_runners"
 
+if [[ -n "${EXPECTED_RUNNER_APP_VERSION:-}" ]]; then
+  matching_versions="$(jq --arg id "$region_id" --arg version "$EXPECTED_RUNNER_APP_VERSION" '
+    (if type == "array" then . else (.items // .result // .data // []) end)
+    | [.[] | select((.regionId // (if (.region | type) == "object" then .region.id else .region end)) == $id and .state == "ready" and .appVersion == $version)]
+    | length' <<<"$runners_json")"
+  (( matching_versions >= 2 )) \
+    || omc::die "expected two ready runners at appVersion $EXPECTED_RUNNER_APP_VERSION; found $matching_versions"
+  echo "PASS runner app version: $matching_versions ready runners report $EXPECTED_RUNNER_APP_VERSION"
+fi
+
+if [[ -n "${EXPECTED_RUNTIME_RUNNER_IMAGE:-}" ]]; then
+  runtime_pods="$(kubectl -n "$NAMESPACE" get pods -l 'daytona.io/manual-runner=true' -o json)"
+  matching_images="$(jq --arg image "$EXPECTED_RUNTIME_RUNNER_IMAGE" '
+    [.items[] | select(.status.phase == "Running")
+      | select(any(.spec.containers[]; .name == "runner" and .image == $image))] | length' <<<"$runtime_pods")"
+  (( matching_images >= 2 )) \
+    || omc::die "expected two running manual runner pods on $EXPECTED_RUNTIME_RUNNER_IMAGE; found $matching_images"
+  echo "PASS runtime runner image: $matching_images pods use $EXPECTED_RUNTIME_RUNNER_IMAGE"
+fi
+
 snapshot_bucket="$(jq -r '.services.snapshotManager.storage.s3.bucket // empty' <<<"$values")"
 runner_bucket="$(jq -r '.services.runner.env.AWS_DEFAULT_BUCKET // empty' <<<"$values")"
 [[ -n "$snapshot_bucket" && "$snapshot_bucket" == "$runner_bucket" ]] \

@@ -51,8 +51,12 @@ done
 helm lint charts/daytona-region -f charts/daytona-region/tests/fixtures/baseline.values.yaml
 
 if [[ "${BUILD_RUNNER_IMAGE:-false}" == "true" ]]; then
+  runner_builder="build-runner-image.sh"
+  if [[ "${RUNNER_SOURCE_BUILD:-false}" == "true" ]]; then
+    runner_builder="build-runner-v0199-source.sh"
+  fi
   IMAGE_REF="$RUNNER_IMAGE_REF" PUSH=true AWS_REGION="$AWS_REGION" \
-    bash "$SCRIPT_DIR/build-runner-image.sh"
+    bash "$SCRIPT_DIR/$runner_builder"
 else
   registry="${RUNNER_IMAGE_REF%%/*}"
   repository_and_tag="${RUNNER_IMAGE_REF#*/}"

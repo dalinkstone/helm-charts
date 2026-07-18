@@ -66,7 +66,10 @@ if [[ -n "${BASE_DOMAIN:-}" ]]; then
 fi
 
 if [[ "${BUILD_RUNNER_IMAGE:-false}" == "true" ]]; then
-  omc::need_cmd docker file gh
+  omc::need_cmd docker file
+  if [[ "${RUNNER_SOURCE_BUILD:-false}" != "true" ]]; then
+    omc::need_cmd gh
+  fi
   docker info >/dev/null 2>&1 \
     || omc::die "BUILD_RUNNER_IMAGE=true requires a Docker-in-Docker-capable sandbox with a running daemon"
 fi

@@ -27,6 +27,7 @@ DNS_NAME="${DNS_NAME:-${api_host%%/*}}"
 SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-}"
 mkdir -p "$STATE_DIR"
 REPORT="${REPORT:-$STATE_DIR/network-smoke-$(date -u +%Y%m%dT%H%M%SZ).log}"
+umask 077
 
 for cmd in kubectl jq; do
   command -v "$cmd" >/dev/null || { echo "ERROR: $cmd is required" >&2; exit 1; }

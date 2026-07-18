@@ -569,6 +569,10 @@ services:
       DAYTONA_API_URL: ""
       SERVER_URL: ""
       API_TOKEN: "secret_api_token"
+      # Optional v0.199 compatibility token. Keep empty for upstream runners.
+      # Patched runners exchange it for short-lived build-context credentials;
+      # it is stored only in the runner Secret, never the ConfigMap.
+      OBJECT_STORAGE_API_TOKEN: ""
       AWS_REGION: ""
       AWS_ENDPOINT_URL: ""
       AWS_ACCESS_KEY_ID: ""

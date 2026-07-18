@@ -166,6 +166,9 @@ services:
         eks.amazonaws.com/role-arn: "${IRSA_ROLE_ARN}"
       automountServiceAccountToken: true
     env:
+      # v0.199 compatibility image exchanges this org key for short-lived
+      # credentials to Daytona's SDK build-context object store.
+      OBJECT_STORAGE_API_TOKEN: "${DAYTONA_API_KEY}"
       AWS_REGION: "${AWS_REGION}"
       AWS_ENDPOINT_URL: "https://s3.${AWS_REGION}.amazonaws.com"
       AWS_DEFAULT_BUCKET: "${S3_BUCKET}"

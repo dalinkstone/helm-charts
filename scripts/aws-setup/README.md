@@ -261,18 +261,26 @@ export AWS_PROFILE=my-profile
 ```
 
 The default `parity` image profile uses the complete public v0.184 bundle. For
-a v0.199 control-plane canary, first build and push the private runner image:
+a v0.199 control-plane canary, build the private runner from the official
+v0.199 source layout with the BYOC object-storage compatibility patch:
 
 ```bash
-RUNNER_BINARY=/secure/path/runner-amd64 \
-IMAGE_REF=<account>.dkr.ecr.<region>.amazonaws.com/daytona-runner:v0.199.0-byoc-amd64 \
-PUSH=true AWS_REGION=<region> \
-./build-runner-image.sh
+IMAGE_REF=<account>.dkr.ecr.us-west-2.amazonaws.com/daytona-runner:v0.199.0-byoc-amd64-object-storage \
+PUSH=true AWS_REGION=us-west-2 \
+./build-runner-v0199-source.sh
 ```
 
 Choose `v0.199-canary` when `up.sh` asks for the image profile and provide the
-full ECR image reference. The builder verifies that the runner extracts both
-the sandbox toolbox daemon and computer-use binary before it can be pushed.
+full ECR image reference. This build fixes the upstream HTTPS endpoint check
+and lets the runner exchange `OBJECT_STORAGE_API_TOKEN` for the short-lived
+credentials used by normal SDK build-context uploads. The AWS values template
+places the already-required Daytona org key in the runner Secret for this
+controlled compatibility profile; the token is never placed in a ConfigMap or
+test receipt. Use a dedicated least-privilege org key for production use.
+
+`build-runner-image.sh` remains available for the older private-release-binary
+wrapper flow. Set `RUNNER_SOURCE_BUILD=true` with `BUILD_RUNNER_IMAGE=true` in
+`canary.env` to select the source builder from `deploy-and-test.sh`.
 
 `up.sh` will, in order: create the EKS cluster (with OIDC) and a sandbox node
 pool labelled `daytona-sandbox-c=true` + tainted `sandbox=true:NoSchedule`;
