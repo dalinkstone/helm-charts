@@ -338,6 +338,8 @@ aws-setup/
 ├── build-runner-image.sh          # build/verify private runner + embedded
 │                                  # sandbox daemon/toolbox; optional ECR push.
 ├── network-smoke.sh               # repeated toolbox/DNS/egress diagnostics.
+├── roll-runner.sh                 # one-command graceful drain, managed-node
+│                                  # replacement, heartbeat, and restore.
 ├── .state/                        # generated at runtime (region-id, names,
 │                                  # IAM keys, rendered manifests). gitignored.
 └── .legacy/                       # RETIRED EC2-on-systemd setup. Not a
@@ -377,6 +379,30 @@ curl -sS -H "Authorization: Bearer $DAYTONA_API_KEY" \
 kubectl -n daytona exec daemonset/daytona-region-runner -c runner -- \
   env | grep -E '^AWS_'
 ```
+
+## Gracefully rolling one runner
+
+`roll-runner.sh` performs the complete operation. With no argument it lists the
+exact runner IDs. With an ID it validates AWS and Kubernetes access, drains and
+backs up the runner's sandboxes, maps the runner to its managed EKS node,
+terminates that EC2 instance, waits for the Auto Scaling replacement and a fresh
+Daytona heartbeat, then restores scheduling. A partially drained roll can be
+resumed by running the same command with the same ID.
+
+```bash
+export AWS_PROFILE=devflow-deployer
+export AWS_REGION=us-west-2
+export DAYTONA_API_URL=https://app.daytona.io/api
+export DAYTONA_API_KEY='...'
+
+./roll-runner.sh
+./roll-runner.sh <complete-runner-uuid>
+```
+
+The command deliberately has no confirmation prompt: supplying the exact UUID
+authorizes replacement of that runner's managed-node-group instance. Never run
+two rolls concurrently in a two-runner region. On failure, do not roll the peer;
+fix the reported prerequisite and resume with the same runner ID.
 
 ## Comparison to the Azure setup (`../azure-setup/`)
 
