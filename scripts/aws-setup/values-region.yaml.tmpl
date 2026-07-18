@@ -167,7 +167,7 @@ services:
       automountServiceAccountToken: true
     env:
       AWS_REGION: "${AWS_REGION}"
-      AWS_ENDPOINT_URL: ""
+      AWS_ENDPOINT_URL: "https://s3.${AWS_REGION}.amazonaws.com"
       AWS_DEFAULT_BUCKET: "${S3_BUCKET}"
       AWS_ACCESS_KEY_ID: "${IAM_ACCESS_KEY}"
       AWS_SECRET_ACCESS_KEY: "${IAM_SECRET_KEY}"

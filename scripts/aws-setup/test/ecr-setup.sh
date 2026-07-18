@@ -250,6 +250,9 @@ if [[ -z "$DAYTONA_REGISTRY_ID" ]]; then
   # Common payload variants (different Daytona versions use different field names)
   declare -a PAYLOAD_VARIANTS=(
     "$(jq -n --arg n "$REGISTRY_NAME" --arg u "$ECR_REGISTRY_URL" \
+            --arg p "$ECR_CACHE_PREFIX" --arg role "$ECR_PULLER_ROLE_ARN" \
+        '{name:$n, url:$u, username:$role, password:"", project:$p}')"
+    "$(jq -n --arg n "$REGISTRY_NAME" --arg u "$ECR_REGISTRY_URL" \
             --arg p "$ECR_CACHE_PREFIX" --arg acct "$AWS_ACCOUNT_ID" \
             --arg reg "$AWS_REGION" --arg role "$ECR_PULLER_ROLE_ARN" \
         '{name:$n, url:$u, project:$p, registryType:"AWS_ECR",
@@ -262,7 +265,7 @@ if [[ -z "$DAYTONA_REGISTRY_ID" ]]; then
         '{name:$n, url:$u, provider:"ecr", awsRoleArn:$role}')"
   )
 
-  for endpoint in docker-registries registries dockerRegistries private-registries; do
+  for endpoint in docker-registry docker-registries registries dockerRegistries private-registries; do
     for payload in "${PAYLOAD_VARIANTS[@]}"; do
       body=$(mktemp)
       http=$(curl -sS -o "$body" -w '%{http_code}' \

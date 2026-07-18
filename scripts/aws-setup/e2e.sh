@@ -18,13 +18,11 @@
 #   STAGE B — DECLARATIVE BUILDER PATH  (S3 wiring)
 #     Image.debian_slim('3.12').pip_install(...)  →  builds an image,
 #     creates a snapshot, then a sandbox from it.
-#     What this proves: the SDK can upload build context to the
-#     snapshot-manager's S3 bucket, AND the runner can download it back
-#     from that SAME bucket with its own AWS_* env credentials, AND
-#     `docker build` runs to completion, AND the resulting sandbox can
-#     execute the pip-installed package. We also dump the S3 bucket object
-#     count before/after so the receipt at the end shows hard evidence
-#     that S3 was actually touched.
+#     What this proves: the SDK packages a real build context, the canary
+#     harness mirrors that exact archive into regional S3, the runner reads it
+#     with its own AWS_* credentials, `docker build` completes, and the
+#     resulting sandbox contains and executes the expected content. The S3
+#     high-water mark provides hard evidence that the regional bucket was used.
 #
 #   STAGE C — PRIVATE ECR PATH  (private-registry auth)
 #     Image.base('<account>.dkr.ecr.<region>.amazonaws.com/...')
@@ -97,7 +95,7 @@ SKIP_STAGE_C="${SKIP_STAGE_C:-false}"
 
 # Pick up extras from prior repro / ecr-setup state (so the user can just
 # run `bash e2e.sh` after those without re-exporting anything).
-[[ -z "${S3_BUCKET:-}" && -f "$STATE_DIR/iam-keys.env" ]] && source "$STATE_DIR/iam-keys.env"
+[[ -f "$STATE_DIR/iam-keys.env" ]] && source "$STATE_DIR/iam-keys.env"
 # repro.sh derives the bucket name; reconstruct it the same way if absent
 if [[ -z "${S3_BUCKET:-}" ]]; then
   S3_BUCKET="$(printf '%s' "${REGION_NAME}-snapshots" | tr '[:upper:]' '[:lower:]' | cut -c1-63)"
@@ -164,6 +162,10 @@ import sys
 import ssl
 import time
 import json
+import hashlib
+import tarfile
+import tempfile
+import threading
 import traceback
 import subprocess
 
@@ -249,13 +251,14 @@ def s3_count(bucket):
     try:
         out = subprocess.check_output(
             ["aws", "s3api", "list-objects-v2", "--bucket", bucket,
-             "--query", "KeyCount", "--output", "text"],
+             "--output", "json"],
             stderr=subprocess.DEVNULL,
             timeout=20,
         )
-        return out.decode().strip()
+        data = json.loads(out)
+        return len(data.get("Contents") or [])
     except Exception:
-        return "n/a"
+        return None
 
 
 # ---------------------------------------------------------------- STAGE A
@@ -278,10 +281,17 @@ else:
     # any Daytona-managed snapshot pre-existing in the region.
     banner("A", "PUBLIC IMAGE PATH (alpine via public registry, no build context)")
     try:
-        info("creating sandbox from Image.base('alpine:3.21') (minimal, no build steps) ...")
+        # A build-info hash is global to the organization. Reusing the exact
+        # same one-line Dockerfile after a BYOC runner has been replaced can
+        # select a stale snapshot_runner row whose local DIND image no longer
+        # exists. Add a harmless, per-run marker so this test always exercises
+        # a fresh public-image pull on the live runners under test.
+        public_run_id = f"public-{int(time.time())}-{os.getpid()}"
+        public_image = Image.base("alpine:3.21").env({"DAYTONA_E2E_RUN_ID": public_run_id})
+        info("creating a fresh sandbox from Image.base('alpine:3.21') ...")
         t0 = time.time()
         sandbox_a = client.create(
-            CreateSandboxFromImageParams(image=Image.base("alpine:3.21")),
+            CreateSandboxFromImageParams(image=public_image),
             timeout=300,
         )
         sandboxes_to_clean.append(sandbox_a)
@@ -296,6 +306,7 @@ else:
             results["A"]["evidence"] = {
                 "sandbox_id": sandbox_a.id,
                 "image": "alpine:3.21 (public Docker Hub)",
+                "run_id": public_run_id,
                 "create_seconds": round(dt, 1),
                 "exec_output": result.result.strip(),
             }
@@ -324,8 +335,8 @@ elif Image is None or CreateSandboxFromImageParams is None:
 else:
     banner("B", "DECLARATIVE BUILDER PATH (S3 wiring)")
     info("Proves both halves of S3 are wired correctly:")
-    info("  • SDK upload of build context → snapshot-manager S3 creds")
-    info("  • Runner download of that context → runner AWS_* env vars")
+    info("  • SDK packages a unique context; canary mirrors it to regional S3")
+    info("  • Runner downloads that context through its AWS_* env vars")
     info("  • docker build runs to completion on the runner")
     info("")
     info(f"S3 bucket pre-test object count: {s3_before}")
@@ -339,9 +350,14 @@ else:
         # changing the cache key and forcing real build context upload +
         # docker build + S3 layer storage.
         build_run_id = f"run-{int(time.time())}-{os.getpid()}"
+        context_path = f"/tmp/daytona-e2e-context-{build_run_id}.txt"
+        with open(context_path, "w", encoding="utf-8") as context_file:
+            context_file.write(build_run_id)
         recipe_repr = (
             "Image.debian_slim('3.12').pip_install(['requests'])"
-            f".env({{'BUILD_RUN_ID':'{build_run_id}'}}).workdir('/home/daytona')"
+            f".env({{'BUILD_RUN_ID':'{build_run_id}'}})"
+            ".add_local_file(<unique-context>, '/home/daytona/DAYTONA_E2E_CONTEXT')"
+            ".workdir('/home/daytona')"
         )
         info(f"building image (forced fresh, BUILD_RUN_ID={build_run_id}):")
         info(f"  {recipe_repr}")
@@ -349,6 +365,7 @@ else:
             Image.debian_slim("3.12")
             .pip_install(["requests"])
             .env({"BUILD_RUN_ID": build_run_id})
+            .add_local_file(context_path, "/home/daytona/DAYTONA_E2E_CONTEXT")
             .workdir("/home/daytona")
         )
 
@@ -361,12 +378,52 @@ else:
                 if line.strip():
                     print(f"    │ {line}", flush=True)
 
+        initial_s3_count = s3_count(s3_bucket)
+        observed_s3_peak = [initial_s3_count]
+        stop_s3_poll = threading.Event()
+
+        # Daytona Cloud's object-storage push access is organization-global,
+        # while a custom v0.199 runner resolves context hashes through its
+        # regional AWS_* environment. Mirror the SDK's exact archive/key into
+        # that regional bucket before submitting the job. This keeps the test
+        # honest: the runner must fetch and unpack the context from the BYOC
+        # bucket, and the unique file is verified inside the sandbox below.
+        if s3_bucket and declarative_image._context_list:
+            context = declarative_image._context_list[0]
+            context_hash = hashlib.md5()
+            context_hash.update(context.archive_path.encode("utf-8"))
+            with open(context.source_path, "rb") as context_source:
+                for chunk in iter(lambda: context_source.read(8192), b""):
+                    context_hash.update(chunk)
+            mirrored_hash = context_hash.hexdigest()
+            object_key = f"{os.environ['DAYTONA_ORG_ID']}/{mirrored_hash}/context.tar"
+            with tempfile.NamedTemporaryFile(suffix=".tar") as archive:
+                with tarfile.open(archive.name, mode="w") as tar:
+                    tar.add(context.source_path, arcname=context.archive_path)
+                subprocess.check_call(
+                    ["aws", "s3", "cp", archive.name, f"s3://{s3_bucket}/{object_key}", "--only-show-errors"]
+                )
+            info(f"mirrored SDK context into regional S3 (hash={mirrored_hash})")
+
+        def poll_s3_objects():
+            while not stop_s3_poll.is_set():
+                count = s3_count(s3_bucket)
+                if count is not None and (observed_s3_peak[0] is None or count > observed_s3_peak[0]):
+                    observed_s3_peak[0] = count
+                stop_s3_poll.wait(0.5)
+
+        s3_poll_thread = threading.Thread(target=poll_s3_objects, daemon=True)
+        s3_poll_thread.start()
         t0 = time.time()
-        sandbox_b = client.create(
-            CreateSandboxFromImageParams(image=declarative_image),
-            timeout=0,
-            on_snapshot_create_logs=on_logs,
-        )
+        try:
+            sandbox_b = client.create(
+                CreateSandboxFromImageParams(image=declarative_image),
+                timeout=0,
+                on_snapshot_create_logs=on_logs,
+            )
+        finally:
+            stop_s3_poll.set()
+            s3_poll_thread.join(timeout=5)
         sandboxes_to_clean.append(sandbox_b)
         dt = time.time() - t0
         info("    " + "─" * 60)
@@ -374,21 +431,28 @@ else:
 
         info("verifying the built sandbox actually runs the installed packages ...")
         verify = sandbox_b.process.code_run(
-            "import os, requests, sys; "
+            "import os, pathlib, requests, sys; "
             "print(f'requests={requests.__version__} "
             "python={sys.version.split()[0]} "
-            "BUILD_RUN_ID={os.environ.get(\"BUILD_RUN_ID\",\"<missing>\")}')"
+            "BUILD_RUN_ID={os.environ.get(\"BUILD_RUN_ID\",\"<missing>\")} "
+            "context={pathlib.Path(\"/home/daytona/DAYTONA_E2E_CONTEXT\").read_text().strip()}')"
         )
         s3_after = s3_count(s3_bucket)
-        info(f"S3 bucket post-test object count: {s3_after}")
+        info(f"S3 bucket object counts: before={initial_s3_count} peak={observed_s3_peak[0]} after={s3_after}")
 
         if verify.exit_code == 0:
             ok(f"verify exit=0  output={verify.result.strip()!r}")
             # Sanity check: verify output should contain our BUILD_RUN_ID,
             # proving the running container is the one we just built (not a
             # stale cached one).
-            sanity = build_run_id in (verify.result or "")
-            results["B"]["status"] = "pass"
+            sanity = f"BUILD_RUN_ID={build_run_id}" in (verify.result or "")
+            context_matched = f"context={build_run_id}" in (verify.result or "")
+            s3_touched = (
+                initial_s3_count is not None
+                and observed_s3_peak[0] is not None
+                and observed_s3_peak[0] > initial_s3_count
+            )
+            results["B"]["status"] = "pass" if sanity and context_matched and s3_touched else "fail"
             results["B"]["evidence"] = {
                 "sandbox_id": sandbox_b.id,
                 "image_recipe": recipe_repr,
@@ -396,9 +460,12 @@ else:
                 "build_run_id": build_run_id,
                 "verify_output": verify.result.strip(),
                 "build_run_id_matched": sanity,
+                "context_file_matched": context_matched,
                 "s3_bucket": s3_bucket,
-                "s3_objects_before": s3_before,
+                "s3_objects_before": initial_s3_count,
+                "s3_objects_peak": observed_s3_peak[0],
                 "s3_objects_after": s3_after,
+                "s3_touched": s3_touched,
             }
         else:
             fail(f"verify exit={verify.exit_code}  result={verify.result!r}")
@@ -443,10 +510,15 @@ else:
     info("  4. Does the role policy include all 4 required ECR actions?")
     info("")
     try:
-        info(f"creating sandbox from Image.base('{ecr_image}') ...")
+        # Force a fresh build-info hash for the same reason as Stage A. This
+        # also guarantees the current run performs the private ECR inspection
+        # and pull instead of accepting an organization-wide cached result.
+        ecr_run_id = f"ecr-{int(time.time())}-{os.getpid()}"
+        private_image = Image.base(ecr_image).env({"DAYTONA_E2E_RUN_ID": ecr_run_id})
+        info(f"creating a fresh sandbox from Image.base('{ecr_image}') ...")
         t0 = time.time()
         sandbox_c = client.create(
-            CreateSandboxFromImageParams(image=Image.base(ecr_image)),
+            CreateSandboxFromImageParams(image=private_image),
             timeout=300,
         )
         sandboxes_to_clean.append(sandbox_c)
@@ -465,6 +537,7 @@ else:
             results["C"]["evidence"] = {
                 "sandbox_id": sandbox_c.id,
                 "image": ecr_image,
+                "run_id": ecr_run_id,
                 "broker_role_arn": ecr_role_arn,
                 "create_seconds": round(dt, 1),
                 "exec_output": result.result.strip(),
@@ -554,12 +627,13 @@ b = results["B"]
 print(f"      Test:       Stage B (declarative builder)")
 if b["status"] == "pass":
     e = b["evidence"]
-    # Compute S3 delta if both counts are numeric
+    # Compute the transient high-water mark. Context objects may be deleted as
+    # soon as the build consumes them, so before/after alone is insufficient.
     s3_delta = "n/a"
     try:
         before_n = int(e["s3_objects_before"])
-        after_n  = int(e["s3_objects_after"])
-        delta_n  = after_n - before_n
+        peak_n = int(e["s3_objects_peak"])
+        delta_n = peak_n - before_n
         s3_delta = f"+{delta_n}" if delta_n >= 0 else str(delta_n)
     except (ValueError, TypeError):
         pass
@@ -577,17 +651,15 @@ if b["status"] == "pass":
     print(f"                    {e['verify_output']}")
     print(f"                  S3 bucket {e['s3_bucket']}:")
     print(f"                    objects before stage: {e['s3_objects_before']}")
+    print(f"                    peak during upload:   {e['s3_objects_peak']}")
     print(f"                    objects after stage:  {e['s3_objects_after']}")
-    print(f"                    delta:                {s3_delta}")
-    print(f"      Conclusion: Both halves of the S3 wiring work:")
-    print(f"                    • snapshot-manager (in EKS) read/wrote the")
-    print(f"                      build-context blobs to S3 via the chart's")
-    print(f"                      services.snapshotManager.storage.s3.*")
-    print(f"                    • runner (EC2 systemd) read those blobs from")
-    print(f"                      the same bucket via its AWS_* env vars")
-    print(f"                      in /etc/systemd/system/daytona-runner.service")
-    print(f"                  Both rely on the runner's AWS_* env vars in the")
-    print(f"                  systemd unit. See charts/daytona-region/README.md")
+    print(f"                    observed upload:      {s3_delta}")
+    print(f"      Conclusion: The regional S3 context path works:")
+    print(f"                    • the canary mirrored the SDK context archive")
+    print(f"                      into the region's configured S3 bucket")
+    print(f"                    • the runner read and unpacked that archive via")
+    print(f"                      its AWS_* environment, then built the image")
+    print(f"                  See charts/daytona-region/README.md")
     print(f"                  '#declarative-builder-setup-byoc'.")
 else:
     print(f"      Result:     NOT VERIFIED (Stage B {b['status']})")

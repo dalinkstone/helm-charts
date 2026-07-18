@@ -55,22 +55,45 @@ kubectl -n "$NAMESPACE" get pods -o json | jq -r '
 echo
 
 runner_pods=()
+declare -A runner_modes=()
+
+# Prefer the pods that contain the live runner process. In the v0.199 canary
+# compatibility layout these are pinned runtime pods with their own Docker
+# daemon; the chart DaemonSet is host preparation only and therefore cannot
+# see their sandbox containers. Fall back to the traditional host runner
+# DaemonSet so this remains compatible with normal chart deployments.
 while IFS= read -r runner_pod; do
-  [[ -n "$runner_pod" ]] && runner_pods+=("$runner_pod")
+  [[ -n "$runner_pod" ]] || continue
+  runner_pods+=("$runner_pod")
+  runner_modes["$runner_pod"]="pod"
 done < <(
-  kubectl -n "$NAMESPACE" get pods -l 'app.kubernetes.io/component=runner,daytona.io/runner=true' \
-    -o json | jq -r '.items[] | select(.status.phase == "Running") | .metadata.name'
+  kubectl -n "$NAMESPACE" get pods -l 'daytona.io/manual-runner=true' -o json \
+    | jq -r '.items[] | select(.status.phase == "Running") | .metadata.name'
 )
-[[ "${#runner_pods[@]}" -gt 0 ]] || { echo "ERROR: no running runner DaemonSet pods"; exit 1; }
+if [[ "${#runner_pods[@]}" -eq 0 ]]; then
+  while IFS= read -r runner_pod; do
+    [[ -n "$runner_pod" ]] || continue
+    runner_pods+=("$runner_pod")
+    runner_modes["$runner_pod"]="host"
+  done < <(
+    kubectl -n "$NAMESPACE" get pods -l 'app.kubernetes.io/component=runner,daytona.io/runner=true' \
+      -o json | jq -r '.items[] | select(.status.phase == "Running") | .metadata.name'
+  )
+fi
+[[ "${#runner_pods[@]}" -gt 0 ]] || { echo "ERROR: no running runner runtime pods"; exit 1; }
 
 host_exec() {
   local pod="$1"
   shift
-  kubectl -n "$NAMESPACE" exec "$pod" -c docker-installer -- \
-    nsenter -t 1 -m -u -n -i -- "$@"
+  if [[ "${runner_modes[$pod]}" == "pod" ]]; then
+    kubectl -n "$NAMESPACE" exec "$pod" -c runner -- "$@"
+  else
+    kubectl -n "$NAMESPACE" exec "$pod" -c docker-installer -- \
+      nsenter -t 1 -m -u -n -i -- "$@"
+  fi
 }
 
-echo "== Host policy and runtime state =="
+echo "== Runner policy and runtime state =="
 for pod in "${runner_pods[@]}"; do
   echo "-- $pod --"
   host_exec "$pod" sh -c '
@@ -141,6 +164,10 @@ host_exec "$selected_pod" docker exec "$selected_id" sh -c \
 echo "injected sandbox binary hash:"
 host_exec "$selected_pod" docker exec "$selected_id" sh -c \
   'sha256sum /usr/local/bin/daytona 2>/dev/null || true'
+echo "sandbox daemon version:"
+host_exec "$selected_pod" docker exec "$selected_id" sh -c \
+  'if command -v wget >/dev/null; then wget -qO- http://127.0.0.1:2280/version; elif command -v curl >/dev/null; then curl -fsS http://127.0.0.1:2280/version; fi'
+echo
 echo
 
 failures=0
@@ -151,9 +178,21 @@ for ((i=1; i<=ITERATIONS; i++)); do
   dns=FAIL
   egress=FAIL
 
-  if host_exec "$selected_pod" timeout 3 bash -c \
-    "exec 3<>/dev/tcp/${sandbox_ip}/${TOOLBOX_PORT}; exec 3>&-" >/dev/null 2>&1; then
+  if host_exec "$selected_pod" sh -c '
+    if command -v nc >/dev/null; then
+      nc -z -w 3 "$1" "$2"
+    elif command -v wget >/dev/null; then
+      wget -qO- -T 3 "http://$1:$2/version" >/dev/null
+    elif command -v bash >/dev/null && command -v timeout >/dev/null; then
+      timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2; exec 3>&-"
+    else
+      exit 77
+    fi
+  ' sh "$sandbox_ip" "$TOOLBOX_PORT" >/dev/null 2>&1; then
     toolbox=PASS
+  else
+    rc=$?
+    [[ "$rc" -eq 77 ]] && { toolbox=SKIP; skips=$((skips + 1)); }
   fi
 
   if host_exec "$selected_pod" docker exec "$selected_id" sh -c \
@@ -168,6 +207,8 @@ for ((i=1; i<=ITERATIONS; i++)); do
   if host_exec "$selected_pod" docker exec "$selected_id" sh -c '
     if command -v python3 >/dev/null; then
       python3 -c "import socket; s=socket.create_connection((\"$1\",int(\"$2\")),3); s.close()"
+    elif command -v nc >/dev/null; then
+      nc -z -w 3 "$1" "$2"
     elif command -v bash >/dev/null && command -v timeout >/dev/null; then
       timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2; exec 3>&-"
     else
