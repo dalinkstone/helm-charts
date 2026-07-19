@@ -42,7 +42,11 @@ Prompts (defaults in `[brackets]`):
 | Resource group | `<cluster>-rg` | |
 | Storage account | `daytonabyoc<random8>` | Globally unique, lowercase alnum 3-24 chars |
 | Blob container | `snapshots` | |
-| Runner image tag | `v0.183.0` | Default matches chart appVersion |
+
+Daytona component images are not prompted independently. The chart pins the
+Docker-Hub-verified parity bundle
+`v0.184.0-k8s-oss.3-amd64` for proxy, runner/embedded daemon,
+snapshot-manager, SSH gateway, and runner-manager.
 
 Answers persist in `scripts/azure-setup/.state/prompts.env`.
 The script selects an AKS VM size that fits the required node count and your

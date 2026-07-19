@@ -29,8 +29,10 @@ spec:
       app.kubernetes.io/component: snapshot-manager
   template:
     metadata:
-      {{- with .Values.services.snapshotManager.podAnnotations }}
       annotations:
+        {{- include "daytona.imageBundleAnnotations" . | nindent 8 }}
+        daytona.io/image-version: {{ .Values.services.snapshotManager.image.tag | default .Chart.AppVersion | quote }}
+      {{- with .Values.services.snapshotManager.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:

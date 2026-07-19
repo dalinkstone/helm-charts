@@ -104,9 +104,10 @@ actions involved.
 | 13 | Validate with the SDK | ✅ `e2e.sh` runs `daytona.create(target=<region>)` |
 
 The chart's `region-registration` pre-install hook registers the region with
-Daytona Cloud; the `runner-manager` Deployment then registers individual
-runners and scales runner pods. There is no VM provisioning, no SSM/SSH, and
-no separate runner installer to drive.
+Daytona Cloud. The `runner-manager` then creates capacity placeholder pods;
+the runner DaemonSet supplies one real runner process per resulting sandbox
+node, and the manager registers that process. There is no manual runner
+Deployment, VM installer, SSM, or SSH bootstrap.
 
 ## Common pitfalls
 
@@ -123,14 +124,12 @@ These surface during a real deployment.
    the inspect/build step. (This template wires both halves from the same
    prompts, so they cannot drift.)
 
-2. **Two different `dtn_xxx` API keys.** The *organization* key is what the
-   chart uses to register the region (the `daytonaApiKey` value, consumed by
-   the `region-registration` hook). The *runner* key is the credential the
-   `runner-manager` uses to register runner pods with Daytona Cloud — it is
-   created by the registration hook and stored in the
-   `<release>-daytona-region-runner-manager-api-key` Secret. They both look
-   like `dtn_...`, so it's easy to confuse the org key for the runner key; you
-   only ever paste the **organization** key.
+2. **Three credentials have different jobs.** You paste only the Daytona
+   *organization* key; the registration hook and manager use it for public
+   organization-scoped APIs. `up.sh` separately generates a manager API key
+   and a runner system bootstrap token in mode-0600 state. Finally,
+   `POST /runners` returns a unique API key for each runner, which the manager
+   sends to that runner over `/system/config`. None are interchangeable.
 
 3. **The wildcard proxy URL needs DNS-01 TLS.** `proxy.<base-domain>` and
    `*.proxy.<base-domain>` must both carry a trusted cert (sandbox previews
@@ -151,9 +150,11 @@ These surface during a real deployment.
    `<release>-daytona-region-region-config` secret out from under the chart.
 
 6. **`helm uninstall` does NOT clean up Daytona Cloud state.** The region you
-   registered (and any runners) stay in Daytona Cloud's database. You have to
-   call the API or visit the dashboard. The [`teardown.sh`](./teardown.sh)
-   script in this directory handles deregistration as part of cleanup.
+   registered (and any runners) stay in Daytona Cloud's database. Use
+   [`teardown.sh`](./teardown.sh), which deregisters matching runners/region,
+   removes the exact Cloudflare records and Stage-C test resources this flow
+   created, and then removes EKS/S3/IAM. It deliberately preserves the
+   user-provided v0.199 runner image repository.
 
 ## Capacity sizing
 
@@ -169,9 +170,18 @@ manages.
   the runner; with CPU over-provisioning a 32 vCPU pool comfortably hosts on the
   order of ~16 sandboxes at 4 vCPU / 4 GiB each.
 
-Scale up or down by changing the sandbox node pool (more/larger nodes →
-more/larger runner pods). For a cheap smoke test, a single small sandbox node
-is enough.
+The AWS flow defaults to three warm runner nodes and a maximum of ten. The
+runner-manager scales up from Daytona availability scores by creating an
+anti-affined placeholder Pod. Cluster Autoscaler turns a pending placeholder
+into an EKS managed-node-group scale-out, and the runner DaemonSet starts the
+runner on that node. The patched v0.199 manager scales down only completely
+idle runners: it makes one runner unschedulable, verifies zero assigned
+sandboxes twice, marks it draining, removes its placeholder, and lets Cluster
+Autoscaler retire the empty node after its unneeded delay.
+
+Set `RUNNER_MIN_COUNT` and `RUNNER_MAX_COUNT` before `up.sh` to change the
+shared runner/node envelope. The EKS node-group limits and runner-manager
+limits are rendered from the same values so they cannot silently diverge.
 
 ## What this setup requires
 
@@ -186,6 +196,68 @@ is enough.
 
 ## How to run
 
+### Unattended canary (recommended)
+
+The v0.199 canary requires a private runner-manager image built from reviewed
+source. `build-runner-manager-source.sh` pins the exact source commit, uses the
+original upstream Dockerfile, verifies a linux/amd64 ELF, and optionally creates
+the ECR repository and pushes the image. It never decompiles a release image or
+runs `install.sh` on a node. A devflow sandbox without DIND should reuse a
+prebuilt ECR image and keep `BUILD_RUNNER_MANAGER_IMAGE=false`.
+
+The supported canary path is one command after filling a non-secret config
+file. Credentials stay in the environment and are never written to that file:
+
+```bash
+mkdir -p scripts/aws-setup/.state
+cp scripts/aws-setup/canary.env.example scripts/aws-setup/.state/canary.env
+$EDITOR scripts/aws-setup/.state/canary.env
+
+bash scripts/aws-setup/deploy-and-test.sh
+```
+
+`deploy-and-test.sh` requires an exact clean `EXPECTED_COMMIT`, checks the AWS
+account/principal/region/session expiration/quota and external APIs, runs Helm
+unit tests plus all four static checks and `helm lint`, verifies or builds the
+v0.199 runner image, and verifies the patched runner-manager image (both ECR
+tags must match their configured immutable digests). It writes
+`.state/prompts.env` mode 0600, deploys, and runs:
+
+- `infra-test.sh` (nodes, taints, rollouts, TLS, image bundle, Daytona region
+  and runner state, and live S3 wiring);
+- `e2e.sh` stages A/B/C (Stage C uses the configured Daytona org id); and
+- `network-e2e.sh`, which creates a distinct sandbox, runs
+  `network-smoke.sh`, and deletes that sandbox in a `finally` block.
+
+Evidence is preserved under `.state/` with mode 0600. The orchestrator never
+runs teardown; the cluster remains available until an operator explicitly runs
+`teardown.sh`.
+
+From devflow, use a dedicated expiring deployment profile and forward only the
+two required API tokens (plus `DAYTONA_ORG_ID` if you keep it outside the
+non-secret config):
+
+```bash
+devflow up dalinkstone/helm-charts \
+  --agent codex \
+  --branch codex/daytona-v0199-canary \
+  --name dv-daytona-v0199 \
+  --size large \
+  --aws-profile devflow-deployer \
+  --secret-env DAYTONA_API_KEY \
+  --secret-env CLOUDFLARE_API_TOKEN \
+  --task "Verify the reviewed HEAD and clean worktree, fill the canary config, run scripts/aws-setup/deploy-and-test.sh, preserve receipts, and do not teardown."
+```
+
+The AWS deployment profile must be an expiring STS/Identity Center session with
+at least three hours remaining at preflight; 4–8 hours is recommended for EKS
+creation and all tests. The chart's `static` runner credential mode creates a
+separate scoped IAM user for the runtime until upstream runner IRSA support is
+functional; it does not turn the forwarded deployment session into a static
+credential.
+
+### Interactive bring-up
+
 ```bash
 cd scripts/aws-setup
 
@@ -199,10 +271,35 @@ export AWS_PROFILE=my-profile
 
 # Single interactive entrypoint: prompts for cluster name, base domain,
 # region name, Daytona API URL + key, AWS region, S3 bucket, and credential
-# mode (static IAM keys vs IRSA). Re-runnable if interrupted; state lives
-# in .state/.
+# mode (static IAM keys vs IRSA), and image profile. Re-runnable if interrupted;
+# state lives in .state/.
 ./up.sh
 ```
+
+The default `parity` image profile uses the complete public v0.184 bundle. For
+a v0.199 control-plane canary, build the private runner from the official
+v0.199 source layout with the BYOC object-storage compatibility patch:
+
+```bash
+IMAGE_REF=<account>.dkr.ecr.us-west-2.amazonaws.com/daytona-runner:v0.199.0-byoc-amd64-object-storage \
+PUSH=true AWS_REGION=us-west-2 \
+./build-runner-v0199-source.sh
+```
+
+The public v0.184 runner-manager is not API-compatible with v0.199. Build the
+source-level fix from private `daytonaio/daytona-ai` branch
+`codex/runner-manager-v0199-api-fix`, publish it to a dedicated ECR repository,
+and configure both `RUNNER_IMAGE_REF` and `RUNNER_MANAGER_IMAGE_REF` (plus their
+digests) before choosing `v0.199-canary`. The runner build fixes the upstream HTTPS endpoint check
+and lets the runner exchange `OBJECT_STORAGE_API_TOKEN` for the short-lived
+credentials used by normal SDK build-context uploads. The AWS values template
+places the already-required Daytona org key in the runner Secret for this
+controlled compatibility profile; the token is never placed in a ConfigMap or
+test receipt. Use a dedicated least-privilege org key for production use.
+
+`build-runner-image.sh` remains available for the older private-release-binary
+wrapper flow. Set `RUNNER_SOURCE_BUILD=true` with `BUILD_RUNNER_IMAGE=true` in
+`canary.env` to select the source builder from `deploy-and-test.sh`.
 
 `up.sh` will, in order: create the EKS cluster (with OIDC) and a sandbox node
 pool labelled `daytona-sandbox-c=true` + tainted `sandbox=true:NoSchedule`;
@@ -221,6 +318,13 @@ kubectl -n daytona get pods
 
 # SDK smoke test: daytona.create(target=<region>) then code_run("...")
 ./e2e.sh
+
+# Explicit live infrastructure assertions and receipt
+./infra-test.sh
+
+# Create a dedicated sandbox, repeatedly test toolbox:2280, DNS, and direct-IP
+# egress, then delete that sandbox even if the smoke test fails.
+ITERATIONS=300 INTERVAL_SECONDS=2 ./network-e2e.sh
 
 # Tear everything down (also deregisters the region from Daytona Cloud)
 ./teardown.sh
@@ -243,6 +347,18 @@ aws-setup/
 │                                  # bucket so the declarative builder works.
 ├── e2e.sh                         # SDK test: daytona.create(target=region)
 │                                  # then code_run("print('Hello World')").
+├── preflight.sh                   # expected AWS identity, expiring session,
+│                                  # quota and external API safety checks.
+├── infra-test.sh                  # runnable live infra assertions + receipt.
+├── deploy-and-test.sh             # unattended static → deploy → live tests.
+├── canary.env.example             # non-secret unattended config template.
+├── network-e2e.sh                 # dedicated sandbox lifecycle wrapper for
+│                                  # network-smoke.sh.
+├── build-runner-image.sh          # build/verify private runner + embedded
+│                                  # sandbox daemon/toolbox; optional ECR push.
+├── network-smoke.sh               # repeated toolbox/DNS/egress diagnostics.
+├── roll-runner.sh                 # one-command graceful drain, managed-node
+│                                  # replacement, heartbeat, and restore.
 ├── .state/                        # generated at runtime (region-id, names,
 │                                  # IAM keys, rendered manifests). gitignored.
 └── .legacy/                       # RETIRED EC2-on-systemd setup. Not a
@@ -283,6 +399,30 @@ kubectl -n daytona exec daemonset/daytona-region-runner -c runner -- \
   env | grep -E '^AWS_'
 ```
 
+## Gracefully rolling one runner
+
+`roll-runner.sh` performs the complete operation. With no argument it lists the
+exact runner IDs. With an ID it validates AWS and Kubernetes access, drains and
+backs up the runner's sandboxes, maps the runner to its managed EKS node,
+terminates that EC2 instance, waits for the Auto Scaling replacement and a fresh
+Daytona heartbeat, then restores scheduling. A partially drained roll can be
+resumed by running the same command with the same ID.
+
+```bash
+export AWS_PROFILE=devflow-deployer
+export AWS_REGION=us-west-2
+export DAYTONA_API_URL=https://app.daytona.io/api
+export DAYTONA_API_KEY='...'
+
+./roll-runner.sh
+./roll-runner.sh <complete-runner-uuid>
+```
+
+The command deliberately has no confirmation prompt: supplying the exact UUID
+authorizes replacement of that runner's managed-node-group instance. Never run
+two rolls concurrently in a two-runner region. On failure, do not roll the peer;
+fix the reported prerequisite and resume with the same runner ID.
+
 ## Comparison to the Azure setup (`../azure-setup/`)
 
 Both setups stand up the identical `daytona-region` chart — runners are a
@@ -318,10 +458,15 @@ more to track and tear down.
 - **Single sandbox node pool, public subnets.** This setup provisions one
   node group in public subnets. Real fleets want sandbox nodes spread across
   multiple AZs and, typically, private subnets with tightened security groups.
-- **No node-pool autoscaler.** The sandbox node pool is a fixed size. A
-  production region usually pairs the DaemonSet with the Cluster Autoscaler or
-  Karpenter so new sandbox nodes (and therefore new runner pods) come up under
-  load.
+- **Cluster Autoscaler is a separately versioned cluster component.** `up.sh`
+  installs chart `9.58.0`, explicitly overrides its image to `v1.36.0` for an
+  EKS 1.36 cluster, and gives its service account a dedicated tag-scoped IRSA
+  role. Override both versions together for another EKS minor. This workload
+  identity does not require IAM Identity Center/AWS SSO.
+- **Node root volume defaults to 250 GiB.** Override
+  `AWS_NODE_VOLUME_SIZE_GB` before the first run when a different size is
+  required. Existing EKS node group volumes are not resized by rerunning this
+  script.
 
 ## When you've finished running it
 

@@ -19,8 +19,10 @@ spec:
       app.kubernetes.io/component: ssh-gateway
   template:
     metadata:
-      {{- with .Values.services.sshGateway.podAnnotations }}
       annotations:
+        {{- include "daytona.imageBundleAnnotations" . | nindent 8 }}
+        daytona.io/image-version: {{ .Values.services.sshGateway.image.tag | default .Chart.AppVersion | quote }}
+      {{- with .Values.services.sshGateway.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:

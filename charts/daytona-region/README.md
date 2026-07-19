@@ -332,9 +332,27 @@ After the key swap, register the gateway address with Daytona Cloud (`PATCH /reg
 
 ## Runner Topology
 
-With `services.runnermanager.enabled: true` (the default), the **runner-manager owns the runner pods**: it spawns them on demand, registers them with Daytona Cloud, and recycles them. The runner DaemonSet then runs **sidecars only** (`docker-installer`, `daytona-binary-installer`) to prepare each sandbox node.
+With `services.runnermanager.enabled: true`, the manager creates lightweight
+`node-placeholder-*` pods to request and retain capacity. The cluster
+autoscaler supplies nodes for those placeholders; the runner DaemonSet's
+`runner` main container is the one actual runner process on each node. The
+manager discovers that DaemonSet pod, creates its Daytona Cloud runner record,
+and sends the returned per-runner API key to `/system/config`.
 
-Leave `services.runner.mainContainer.enabled: false` in this topology. A static main-container runner is never registered with Daytona Cloud (the manager only registers pods it created) and competes with the manager's pods for hostPorts 3000/2220 — the visible symptom is a DaemonSet pod stuck `Pending` with `didn't have free ports`. `mainContainer: true` exists for environments that run the runner process statically without the manager.
+`MIN_RUNNERS` and `MAX_RUNNERS` define the runner-manager envelope; the cloud
+node pool must use the same minimum and maximum. The manager samples Daytona
+availability scores, adds one placeholder below `SCALE_UP_THRESHOLD`, and the
+v0.199 compatibility build retires one completely idle runner above
+`SCALE_DOWN_THRESHOLD`. Retirement first disables scheduling, waits the
+configured stabilization period, verifies that no sandbox remains assigned,
+marks the runner draining, and only then removes its API record and placeholder.
+The Kubernetes Cluster Autoscaler, Karpenter, or another node provisioner is
+still required: the Daytona chart does not create cloud worker nodes itself.
+
+Accordingly, the K8s-native topology uses
+`services.runner.mainContainer.enabled: true`. The manager does **not** create
+standalone runner Deployments. A deployment that uses manual runner
+Deployments or an API route-rewrite proxy is outside this chart-managed path.
 
 ## URL Derivation
 
@@ -588,7 +606,34 @@ Snapshot-manager log shows `panic ... nil pointer` in `s3-aws.(*driver).Writer` 
 
 ### runnermanager ImagePullBackOff
 
-Not every chart `appVersion` has a matching `daytonaio/daytona-runner-manager` tag on Docker Hub. Keep the chart's pinned default tag, or verify the tag exists before overriding `services.runnermanager.image.tag`.
+The chart defaults every version-coupled Daytona image to its `appVersion`,
+currently `v0.184.0-k8s-oss.3-amd64`. Docker Hub publishes that exact tag for
+proxy, runner (including its embedded sandbox daemon), snapshot-manager,
+ssh-gateway, and runner-manager. Do not override a single component in
+isolation. Before selecting a different bundle, verify the exact tag exists for
+all five repositories and confirm the bundle is compatible with the Daytona
+Cloud control-plane version.
+
+The chart rejects an accidental partial override at render time. Existing
+generated values from an older setup may still contain
+`services.runner.image.tag: v0.183.0`; re-run the cloud `up.sh` to regenerate
+the values file, or remove that override before upgrading.
+
+An intentionally mixed compatibility canary must opt in and name the bundle:
+
+```yaml
+imageBundle:
+  name: control-v0.199-runner-canary
+  allowVersionSkew: true
+```
+
+All five component pods are annotated with the bundle name, whether skew was
+approved, and their actual image tag. A private runner is special: the runner
+binary embeds the `daemon-amd64` toolbox and computer-use binaries injected
+into new sandboxes. Use `scripts/aws-setup/build-runner-image.sh` to build and
+verify that image; do not treat a raw runner binary as a complete Kubernetes
+image. Recreate sandboxes after changing the runner so they receive the newly
+extracted daemon/toolbox assets.
 
 ### ECR snapshot creation fails with `no basic auth credentials`
 

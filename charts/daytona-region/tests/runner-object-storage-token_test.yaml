@@ -1,0 +1,28 @@
+suite: runner object-storage compatibility token
+templates:
+  - runner-secret.yaml
+release:
+  name: test-release
+  namespace: test-ns
+tests:
+  - it: omits the compatibility token by default
+    set:
+      regionName: test
+      proxyUrl: https://p.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: test
+    asserts:
+      - notExists:
+          path: stringData.OBJECT_STORAGE_API_TOKEN
+
+  - it: stores the compatibility token only in the runner Secret when configured
+    set:
+      regionName: test
+      proxyUrl: https://p.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: test
+      services.runner.env.OBJECT_STORAGE_API_TOKEN: dedicated-object-storage-token
+    asserts:
+      - equal:
+          path: stringData.OBJECT_STORAGE_API_TOKEN
+          value: dedicated-object-storage-token

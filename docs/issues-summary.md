@@ -15,6 +15,18 @@ The runner currently requires non-empty `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCE
 
 Sandbox containers are attached to host Docker bridges and can otherwise reach private cluster ranges, node services, and metadata endpoints. The chart-side `services.runner.networkPolicy` enforcer blocks those paths with host iptables rules, but this is node-wide and not visible to Daytona Cloud; the upstream direction is a runner/API-owned policy model with default private-range protections and organization-level allowlists.
 
+## Runner-manager v0.199 API Compatibility
+
+The latest public runner-manager image (`v0.184.0-k8s-oss.3-amd64`) embeds a
+generated client that still uses `GET /runners/by-region/{id}` and registers
+through the internal `POST /admin/runners` endpoint. Daytona v0.199 exposes the
+organization-scoped equivalents as `GET /runners?regionId=...` and
+`POST /runners`; organization keys receive 404/403 from the old calls. The
+source-level compatibility image changes the manager call sites to the public
+API and deliberately refuses to overwrite a conflicting runner whose API key
+cannot be recovered. This remains a private compatibility build until Daytona
+publishes a reviewed runner-manager release containing the same change.
+
 ## Snapshot Scheduling Affinity
 
 Snapshot placement currently uses a hard warm-runner filter, so if only one runner has a snapshot ready, same-snapshot sandbox creates can all land on that runner while other healthy runners sit idle. A better upstream model would keep warm runners preferred but not exclusive, or expose explicit prewarm controls so operators can warm more runners without relying on database-side workarounds.

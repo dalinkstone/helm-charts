@@ -12,11 +12,17 @@
 #   IAM_ACCESS_KEY               - IAM user access key (when credentialMode=static, else empty)
 #   IAM_SECRET_KEY               - IAM user secret key (when credentialMode=static, else empty)
 #   IRSA_ROLE_ARN                - IAM role ARN annotation (when credentialMode=irsa, else empty)
-#   RUNNER_IMAGE_TAG             - daytona-runner image tag (default v0.183.0 = chart appVersion)
 #   INTERNAL_REGISTRY_HOST       - optional cluster-DNS hostname for an internal Docker registry (empty = none)
 #   PRIV_CLIENT_B64              - base64 of the gateway->sandbox client PRIVATE key file
 #   PUB_CLIENT_B64               - base64 of the matching client PUBLIC key file
 #   PRIV_GATEWAY_B64             - base64 of the gateway HOST key file
+#   DAYTONA_*_IMAGE_TAG          - explicit component tags for a named canary
+#   RUNNER_IMAGE_*               - registry/repository/tag for the runner image
+#   RUNNER_*                     - shared runner-manager/EKS scaling policy
+
+imageBundle:
+  name: "${DAYTONA_IMAGE_BUNDLE_NAME}"
+  allowVersionSkew: ${DAYTONA_ALLOW_VERSION_SKEW}
 
 baseDomain: "${BASE_DOMAIN}"
 regionName: "${REGION_NAME}"
@@ -61,6 +67,8 @@ services:
         value: "true"
         effect: NoSchedule
   proxy:
+    image:
+      tag: "${DAYTONA_PROXY_IMAGE_TAG}"
     ingress:
       enabled: true
       className: "nginx"
@@ -82,6 +90,8 @@ services:
 
   sshGateway:
     enabled: true
+    image:
+      tag: "${DAYTONA_SSH_GATEWAY_IMAGE_TAG}"
     # BOOTSTRAP value only: the gateway validates SSH sessions against the
     # Daytona API and the org key 403s on ValidateSshAccess. up.sh swaps in the
     # REGION-SCOPED key right after install (omc::region_sshgateway_finalize) —
@@ -94,6 +104,8 @@ services:
 
   snapshotManager:
     enabled: true
+    image:
+      tag: "${DAYTONA_SNAPSHOT_MANAGER_IMAGE_TAG}"
     logLevel: "info"
     ingress:
       enabled: true
@@ -125,14 +137,15 @@ services:
 
   runner:
     image:
+      registry: "${RUNNER_IMAGE_REGISTRY}"
+      repository: "${RUNNER_IMAGE_REPOSITORY}"
       tag: "${RUNNER_IMAGE_TAG}"
-    # The runner-manager owns the real (cloud-registered) runner pods; they
-    # envFrom runner-config/runner-secrets and bind hostPorts 3000/2220. A
-    # static mainContainer runner never registers with Daytona Cloud and
-    # would fight the manager's pods for those hostPorts — keep the
-    # DaemonSet sidecar-only (host prep: docker + daemon binaries).
+    # The manager creates one placeholder pod per desired runner. Kubernetes
+    # then schedules a sandbox node, and this DaemonSet supplies the actual
+    # runner process on that node. This is the upstream runner-manager design;
+    # the manager does not create a separate runner Deployment.
     mainContainer:
-      enabled: false
+      enabled: true
     ports:
       api: 3000
       ssh: 2220
@@ -153,8 +166,11 @@ services:
         eks.amazonaws.com/role-arn: "${IRSA_ROLE_ARN}"
       automountServiceAccountToken: true
     env:
+      # v0.199 compatibility image exchanges this org key for short-lived
+      # credentials to Daytona's SDK build-context object store.
+      OBJECT_STORAGE_API_TOKEN: "${DAYTONA_API_KEY}"
       AWS_REGION: "${AWS_REGION}"
-      AWS_ENDPOINT_URL: ""
+      AWS_ENDPOINT_URL: "https://s3.${AWS_REGION}.amazonaws.com"
       AWS_DEFAULT_BUCKET: "${S3_BUCKET}"
       AWS_ACCESS_KEY_ID: "${IAM_ACCESS_KEY}"
       AWS_SECRET_ACCESS_KEY: "${IAM_SECRET_KEY}"
@@ -164,3 +180,20 @@ services:
     dockerInstaller:
       dynamicHostAliases: []
       insecureRegistries: []
+
+  runnermanager:
+    image:
+      registry: "${RUNNER_MANAGER_IMAGE_REGISTRY}"
+      repository: "${RUNNER_MANAGER_IMAGE_REPOSITORY}"
+      tag: "${DAYTONA_RUNNER_MANAGER_IMAGE_TAG}"
+    auth:
+      apiKey: "${RUNNER_MANAGER_API_KEY}"
+      systemApiToken: "${RUNNER_SYSTEM_API_TOKEN}"
+    env:
+      MIN_RUNNERS: "${RUNNER_MIN_COUNT}"
+      MAX_RUNNERS: "${RUNNER_MAX_COUNT}"
+      SCALE_UP_THRESHOLD: "${RUNNER_SCALE_UP_THRESHOLD}"
+      SCALE_DOWN_THRESHOLD: "${RUNNER_SCALE_DOWN_THRESHOLD}"
+      MAXIMUM_CONCURRENT_INITIALIZING: "${RUNNER_MAXIMUM_CONCURRENT_INITIALIZING}"
+      MAXIMUM_CONCURRENT_DRAINING: "${RUNNER_MAXIMUM_CONCURRENT_DRAINING}"
+      SCALE_DOWN_STABILIZATION_SECONDS: "${RUNNER_SCALE_DOWN_STABILIZATION_SECONDS}"

@@ -2,8 +2,11 @@ apiVersion: v2
 name: daytona-region
 description: A Helm chart for Daytona custom region
 type: application
-version: 0.1.0
-appVersion: "v0.183.0"
+version: 0.1.1
+# Keep this on a tag published for every version-coupled BYOC image:
+# proxy, runner (and its embedded sandbox daemon), snapshot-manager,
+# ssh-gateway, and runner-manager.
+appVersion: "v0.184.0-k8s-oss.3-amd64"
 keywords:
   - ai
   - infrastructure

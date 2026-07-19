@@ -6,10 +6,10 @@ metadata:
   name: release-name-daytona-region-proxy
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: proxy
 
@@ -21,10 +21,10 @@ metadata:
   name: release-name-daytona-region-runnermanager
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runnermanager
 
@@ -36,10 +36,10 @@ metadata:
   name: release-name-daytona-region-runner
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runner
 
@@ -51,12 +51,31 @@ metadata:
   name: release-name-daytona-region-ssh-gateway
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: ssh-gateway
+
+---
+# Source: daytona-region/templates/runner-manager-auth-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: release-name-daytona-region-runnermanager-auth
+  namespace: default
+  labels:
+    helm.sh/chart: daytona-region-0.1.1
+    app.kubernetes.io/name: daytona-region
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: runnermanager
+type: Opaque
+stringData:
+  API_KEY: "secret_api_key"
+  SYSTEM_API_TOKEN: "system_secret_token"
 
 ---
 # Source: daytona-region/templates/runner-secret.yaml
@@ -66,10 +85,10 @@ metadata:
   name: release-name-daytona-region-runner-secrets
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runner
 type: Opaque
@@ -92,10 +111,10 @@ metadata:
   name: release-name-daytona-region-secret-ssh
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
 type: Opaque
 data:
@@ -112,10 +131,10 @@ metadata:
   name: release-name-daytona-region-runner-config
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runner
 data:
@@ -136,7 +155,9 @@ data:
   # into runner pods via envFrom by the runner-manager.
   # Static
   DAEMON_BINARIES_DIR: "/var/lib/daytona/binaries"
-  CONFIG_FILE_PATH: "/host-token/token.txt"
+  # Persist the per-runner API key on the host-backed /var/lib/daytona mount so
+  # a runner container restart does not revert to the generic bootstrap token.
+  CONFIG_FILE_PATH: "/var/lib/daytona/runner/token.txt"
 
 ---
 # Source: daytona-region/templates/runner-docker-installer-configmap.yaml
@@ -146,10 +167,10 @@ metadata:
   name: release-name-daytona-region-runner-docker-installer-config
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runner
 data:
@@ -163,10 +184,10 @@ kind: ClusterRole
 metadata:
   name: release-name-daytona-region-runner-manager-nodes
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runnermanager
 rules:
@@ -181,10 +202,10 @@ kind: ClusterRoleBinding
 metadata:
   name: release-name-daytona-region-runner-manager-nodes
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runnermanager
 roleRef:
@@ -204,10 +225,10 @@ metadata:
   name: release-name-daytona-region-runnermanager
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runnermanager
 rules:
@@ -229,10 +250,10 @@ metadata:
   name: release-name-daytona-region-runnermanager
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runnermanager
 roleRef:
@@ -252,10 +273,10 @@ metadata:
   namespace: default
   name: release-name-daytona-region-proxy
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: proxy
 spec:
@@ -278,10 +299,10 @@ metadata:
   name: release-name-daytona-region-runnermanager
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runnermanager
 spec:
@@ -304,10 +325,10 @@ metadata:
   name: release-name-daytona-region-ssh-gateway
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: ssh-gateway
 spec:
@@ -330,10 +351,10 @@ metadata:
   name: release-name-daytona-region-runner
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runner
 spec:
@@ -349,6 +370,10 @@ spec:
       maxUnavailable: 1
   template:
     metadata:
+      annotations:
+        daytona.io/image-bundle: "parity-v0.184.0-k8s-oss.3-amd64"
+        daytona.io/version-skew-approved: "false"
+        daytona.io/image-version: "v0.184.0-k8s-oss.3-amd64"
       labels:
         app.kubernetes.io/name: daytona-region
         app.kubernetes.io/instance: release-name
@@ -794,7 +819,7 @@ spec:
         #   path on the host via the host-root bind-mount. Stale empty
         #   directories auto-created by Docker are cleaned up first.
         - name: daytona-binary-installer
-          image: "docker.io/daytonaio/daytona-runner:v0.183.0"
+          image: "docker.io/daytonaio/daytona-runner:v0.184.0-k8s-oss.3-amd64"
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -935,6 +960,7 @@ spec:
           hostPath:
             path: /
             type: Directory
+
 ---
 # Source: daytona-region/templates/proxy-deployment.yaml
 apiVersion: apps/v1
@@ -943,10 +969,10 @@ metadata:
   namespace: default
   name: release-name-daytona-region-proxy
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: proxy
 spec:
@@ -958,6 +984,10 @@ spec:
       app.kubernetes.io/component: proxy
   template:
     metadata:
+      annotations:
+        daytona.io/image-bundle: "parity-v0.184.0-k8s-oss.3-amd64"
+        daytona.io/version-skew-approved: "false"
+        daytona.io/image-version: "v0.184.0-k8s-oss.3-amd64"
       labels:
         app.kubernetes.io/name: daytona-region
         app.kubernetes.io/instance: release-name
@@ -975,7 +1005,7 @@ spec:
             readOnlyRootFilesystem: false
             runAsNonRoot: false
             runAsUser: 0
-          image: "docker.io/daytonaio/daytona-proxy:v0.183.0"
+          image: "docker.io/daytonaio/daytona-proxy:v0.184.0-k8s-oss.3-amd64"
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -1018,10 +1048,10 @@ metadata:
   namespace: default
   name: release-name-daytona-region-runnermanager
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: runnermanager
 spec:
@@ -1035,6 +1065,10 @@ spec:
       app.kubernetes.io/component: runnermanager
   template:
     metadata:
+      annotations:
+        daytona.io/image-bundle: "parity-v0.184.0-k8s-oss.3-amd64"
+        daytona.io/version-skew-approved: "false"
+        daytona.io/image-version: "v0.184.0-k8s-oss.3-amd64"
       labels:
         app.kubernetes.io/name: daytona-region
         app.kubernetes.io/instance: release-name
@@ -1052,21 +1086,53 @@ spec:
             readOnlyRootFilesystem: false
             runAsNonRoot: false
             runAsUser: 0
-          image: "docker.io/daytonaio/daytona-runner-manager:v0.158.4-4-byoc-amd64"
+          image: "docker.io/daytonaio/daytona-runner-manager:v0.184.0-k8s-oss.3-amd64"
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 3010
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 2
+            failureThreshold: 3
           env:
             - name: API_PORT
               value: "3010"
-            # Floor of ready runners the manager maintains. Default 2 so a region
-            # NEVER runs on a single runner: when one is rolled/lost, a peer is
-            # already up for sandboxes to migrate onto. Pairs with the >=2 sandbox
-            # node pool (otherwise the extra runner pod has nowhere to schedule).
+            # Floor of ready runners the manager maintains. Pairs with the cloud
+            # sandbox node-pool minimum; each placeholder is anti-affined to one
+            # node and each node receives one DaemonSet runner.
             - name: MIN_RUNNERS
+              value: "3"
+            - name: MAX_RUNNERS
+              value: "10"
+            - name: SCALE_UP_THRESHOLD
+              value: "25"
+            - name: SCALE_DOWN_THRESHOLD
+              value: "75"
+            - name: MAXIMUM_CONCURRENT_INITIALIZING
               value: "2"
+            - name: MAXIMUM_CONCURRENT_DRAINING
+              value: "1"
+            - name: SCALE_DOWN_STABILIZATION_SECONDS
+              value: "30"
             # Daytona org API key (Bearer) — same value as daytonaApiKey / registration hook secret
             - name: API_TOKEN
               valueFrom:
@@ -1081,6 +1147,16 @@ spec:
               value: "info"
             - name: POD_WAIT_TIMEOUT
               value: "600"
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: release-name-daytona-region-runnermanager-auth
+                  key: API_KEY
+            - name: SYSTEM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: release-name-daytona-region-runnermanager-auth
+                  key: SYSTEM_API_TOKEN
             - name: SERVER_URL
               value: "https://api.daytona.example.com/api"
             - name: REGION_ID
@@ -1095,7 +1171,7 @@ spec:
             - name: PLACEHOLDER_POD_IMAGE
               value: "registry.k8s.io/pause:3.6"
             - name: RUNNER_POD_IMAGE
-              value: "docker.io/daytonaio/daytona-runner:v0.183.0"
+              value: "docker.io/daytonaio/daytona-runner:v0.184.0-k8s-oss.3-amd64"
             - name: RUNNER_POD_SERVICE_ACCOUNT
               value: "release-name-daytona-region-runner"
             - name: RUNNER_POD_CONFIG_MAP
@@ -1130,10 +1206,10 @@ metadata:
   name: release-name-daytona-region-ssh-gateway
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: ssh-gateway
 spec:
@@ -1145,6 +1221,10 @@ spec:
       app.kubernetes.io/component: ssh-gateway
   template:
     metadata:
+      annotations:
+        daytona.io/image-bundle: "parity-v0.184.0-k8s-oss.3-amd64"
+        daytona.io/version-skew-approved: "false"
+        daytona.io/image-version: "v0.184.0-k8s-oss.3-amd64"
       labels:
         app.kubernetes.io/name: daytona-region
         app.kubernetes.io/instance: release-name
@@ -1162,7 +1242,7 @@ spec:
             readOnlyRootFilesystem: false
             runAsNonRoot: false
             runAsUser: 0
-          image: "docker.io/daytonaio/daytona-ssh-gateway:v0.183.0"
+          image: "docker.io/daytonaio/daytona-ssh-gateway:v0.184.0-k8s-oss.3-amd64"
           imagePullPolicy: IfNotPresent
           ports:
             - name: ssh
@@ -1194,10 +1274,10 @@ metadata:
   name: release-name-daytona-region-proxy
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: proxy
   annotations:
@@ -1241,10 +1321,10 @@ metadata:
   name: release-name-daytona-region-region-registration
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: region-registration
   annotations:
@@ -1259,10 +1339,10 @@ metadata:
   name: release-name-daytona-region-daytona-api-key
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: region-registration
   annotations:
@@ -1283,10 +1363,10 @@ metadata:
   name: release-name-daytona-region-region-registration
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: region-registration
   annotations:
@@ -1305,10 +1385,10 @@ metadata:
   name: release-name-daytona-region-region-registration
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: region-registration
   annotations:
@@ -1332,10 +1412,10 @@ metadata:
   name: release-name-daytona-region-region-registration
   namespace: default
   labels:
-    helm.sh/chart: daytona-region-0.1.0
+    helm.sh/chart: daytona-region-0.1.1
     app.kubernetes.io/name: daytona-region
     app.kubernetes.io/instance: release-name
-    app.kubernetes.io/version: "v0.183.0"
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: region-registration
   annotations:
@@ -1381,10 +1461,10 @@ spec:
                 name: release-name-daytona-region-region-config
                 namespace: default
                 labels:
-                  helm.sh/chart: daytona-region-0.1.0
+                  helm.sh/chart: daytona-region-0.1.1
                   app.kubernetes.io/name: daytona-region
                   app.kubernetes.io/instance: release-name
-                  app.kubernetes.io/version: "v0.183.0"
+                  app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
                   app.kubernetes.io/managed-by: Helm
                   app.kubernetes.io/component: region-config
               type: Opaque

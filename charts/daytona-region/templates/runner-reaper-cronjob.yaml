@@ -110,15 +110,26 @@ spec:
                   deco="$(printf '%s' "$runners" | jq -r '[ .[] | select(.state == "decommissioned") | .id ] | .[]')"
 
                   acted=0
+                  failures=0
                   for id in $stale; do
                     [ -z "$id" ] && continue
                     acted=1
                     echo "runner ${id}: unresponsive >= ${GRACE_SECONDS}s -> unschedulable + draining"
                     if [ "$DRY_RUN" = "true" ]; then echo "  [dry-run] no API calls made"; continue; fi
                     c1="$(http PATCH "${DAYTONA_API_URL}/runners/${id}/scheduling" '{"unschedulable":true}')"
-                    [ "$c1" = 200 ] && echo "  unschedulable=true (200)" || echo "  WARN: scheduling PATCH HTTP ${c1}: $(cat /tmp/body)"
+                    if [ "$c1" = 200 ]; then
+                      echo "  unschedulable=true (200)"
+                    else
+                      echo "  ERROR: scheduling PATCH HTTP ${c1}: $(cat /tmp/body)"
+                      failures=$((failures + 1))
+                    fi
                     c2="$(http PATCH "${DAYTONA_API_URL}/runners/${id}/draining" '{"draining":true}')"
-                    [ "$c2" = 200 ] && echo "  draining=true (200)" || echo "  WARN: draining PATCH HTTP ${c2}: $(cat /tmp/body)"
+                    if [ "$c2" = 200 ]; then
+                      echo "  draining=true (200)"
+                    else
+                      echo "  ERROR: draining PATCH HTTP ${c2}: $(cat /tmp/body)"
+                      failures=$((failures + 1))
+                    fi
                   done
 
                   if [ "$DELETE_DECOMMISSIONED" = "true" ]; then
@@ -127,13 +138,28 @@ spec:
                       acted=1
                       echo "runner ${id}: decommissioned -> delete"
                       if [ "$DRY_RUN" = "true" ]; then echo "  [dry-run] no API calls made"; continue; fi
-                      http PATCH "${DAYTONA_API_URL}/runners/${id}/scheduling" '{"unschedulable":true}' >/dev/null 2>&1 || true
+                      cs="$(http PATCH "${DAYTONA_API_URL}/runners/${id}/scheduling" '{"unschedulable":true}')"
+                      if [ "$cs" = 200 ]; then
+                        echo "  unschedulable=true (200)"
+                      else
+                        echo "  ERROR: scheduling PATCH HTTP ${cs}: $(cat /tmp/body)"
+                        failures=$((failures + 1))
+                      fi
                       cd="$(http DELETE "${DAYTONA_API_URL}/runners/${id}")"
-                      [ "$cd" = 204 ] && echo "  deleted (204)" || echo "  WARN: delete HTTP ${cd} (may still have live sandboxes): $(cat /tmp/body)"
+                      if [ "$cd" = 204 ]; then
+                        echo "  deleted (204)"
+                      else
+                        echo "  ERROR: delete HTTP ${cd} (may still have live sandboxes): $(cat /tmp/body)"
+                        failures=$((failures + 1))
+                      fi
                     done
                   fi
 
                   [ "$acted" = 0 ] && echo "no stale/decommissioned runners in region ${REGION_ID}"
+                  if [ "$failures" -gt 0 ]; then
+                    echo "runner-reaper: ${failures} API operation(s) failed"
+                    exit 1
+                  fi
                   echo "runner-reaper: done"
               env:
                 - name: DAYTONA_API_URL

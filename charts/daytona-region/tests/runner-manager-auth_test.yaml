@@ -1,0 +1,149 @@
+suite: runner-manager and runner bootstrap authentication
+templates:
+  - runner-manager-auth-secret.yaml
+  - runner-manager-deployment.yaml
+  - runner-configmap.yaml
+  - runner-daemonset.yaml
+release:
+  name: test-release
+  namespace: test-ns
+tests:
+  - it: creates a chart-managed bootstrap secret
+    template: runner-manager-auth-secret.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+      services.runnermanager.auth.apiKey: manager-key
+      services.runnermanager.auth.systemApiToken: runner-system-key
+    asserts:
+      - equal:
+          path: metadata.name
+          value: test-release-daytona-region-runnermanager-auth
+      - equal:
+          path: stringData.API_KEY
+          value: manager-key
+      - equal:
+          path: stringData.SYSTEM_API_TOKEN
+          value: runner-system-key
+
+  - it: manager reads both bootstrap credentials from the shared secret
+    template: runner-manager-deployment.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="API_KEY")].valueFrom.secretKeyRef.name'
+          value: test-release-daytona-region-runnermanager-auth
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SYSTEM_API_TOKEN")].valueFrom.secretKeyRef.name'
+          value: test-release-daytona-region-runnermanager-auth
+
+  - it: configures bounded runner autoscaling with safe defaults
+    template: runner-manager-deployment.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MIN_RUNNERS")].value'
+          value: "3"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MAX_RUNNERS")].value'
+          value: "10"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_UP_THRESHOLD")].value'
+          value: "25"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_DOWN_THRESHOLD")].value'
+          value: "75"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MAXIMUM_CONCURRENT_DRAINING")].value'
+          value: "1"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_DOWN_STABILIZATION_SECONDS")].value'
+          value: "30"
+
+  - it: accepts customer runner autoscaling limits and thresholds
+    template: runner-manager-deployment.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+      services.runnermanager.env.MIN_RUNNERS: "5"
+      services.runnermanager.env.MAX_RUNNERS: "50"
+      services.runnermanager.env.SCALE_UP_THRESHOLD: "20"
+      services.runnermanager.env.SCALE_DOWN_THRESHOLD: "80"
+      services.runnermanager.env.MAXIMUM_CONCURRENT_INITIALIZING: "4"
+      services.runnermanager.env.MAXIMUM_CONCURRENT_DRAINING: "2"
+      services.runnermanager.env.SCALE_DOWN_STABILIZATION_SECONDS: "60"
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MIN_RUNNERS")].value'
+          value: "5"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MAX_RUNNERS")].value'
+          value: "50"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_UP_THRESHOLD")].value'
+          value: "20"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_DOWN_THRESHOLD")].value'
+          value: "80"
+
+  - it: runner reads the same system token as the manager
+    template: runner-daemonset.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+      services.runner.mainContainer.enabled: true
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[?(@.name=="runner")].env[?(@.name=="SYSTEM_API_TOKEN")].valueFrom.secretKeyRef.name'
+          value: test-release-daytona-region-runnermanager-auth
+
+  - it: persists the registered runner token on the host-backed data path
+    template: runner-configmap.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+    asserts:
+      - equal:
+          path: data.CONFIG_FILE_PATH
+          value: /var/lib/daytona/runner/token.txt
+
+  - it: uses an existing auth secret without rendering a duplicate
+    template: runner-manager-auth-secret.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+      services.runnermanager.auth.existingSecret: existing-runner-auth
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: manager references the configured existing auth secret
+    template: runner-manager-deployment.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+      services.runnermanager.auth.existingSecret: existing-runner-auth
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SYSTEM_API_TOKEN")].valueFrom.secretKeyRef.name'
+          value: existing-runner-auth

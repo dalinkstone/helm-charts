@@ -1,0 +1,47 @@
+suite: Daytona image compatibility bundle
+templates:
+  - proxy-deployment.yaml
+release:
+  name: test-release
+  namespace: test-ns
+tests:
+  - it: records the default parity bundle on the proxy pod
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: test
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["daytona.io/image-bundle"]
+          value: parity-v0.184.0-k8s-oss.3-amd64
+      - equal:
+          path: spec.template.metadata.annotations["daytona.io/version-skew-approved"]
+          value: "false"
+      - equal:
+          path: spec.template.metadata.annotations["daytona.io/image-version"]
+          value: v0.184.0-k8s-oss.3-amd64
+
+  - it: accepts and records an explicitly named mixed-version canary
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: test
+      imageBundle.allowVersionSkew: true
+      imageBundle.name: control-v0.199-runner-canary
+      services.proxy.image.tag: v0.189.0-amd64
+      services.runner.image.tag: v0.199.0-byoc-amd64
+      services.snapshotManager.image.tag: v0.189.0-amd64
+      services.sshGateway.image.tag: v0.189.0-amd64
+      services.runnermanager.image.tag: v0.184.0-k8s-oss.3-amd64
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["daytona.io/image-bundle"]
+          value: control-v0.199-runner-canary
+      - equal:
+          path: spec.template.metadata.annotations["daytona.io/version-skew-approved"]
+          value: "true"
+      - equal:
+          path: spec.template.metadata.annotations["daytona.io/image-version"]
+          value: v0.189.0-amd64

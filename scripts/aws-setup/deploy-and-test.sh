@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# One unattended entrypoint: static gates, AWS bring-up, live infra, E2E, smoke.
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CONFIG_FILE="${1:-$SCRIPT_DIR/.state/canary.env}"
+if [[ -f "$CONFIG_FILE" ]]; then
+  set -a
+  # Operator-selected non-secret config file.
+  # shellcheck disable=SC1090
+  . "$CONFIG_FILE"
+  set +a
+elif [[ $# -gt 0 ]]; then
+  echo "ERROR: config file not found: $CONFIG_FILE" >&2
+  exit 1
+fi
+
+: "${EXPECTED_COMMIT:?Set EXPECTED_COMMIT to the reviewed branch HEAD}"
+: "${CLUSTER_NAME:?Set CLUSTER_NAME}"
+: "${BASE_DOMAIN:?Set BASE_DOMAIN}"
+: "${REGION_NAME:?Set REGION_NAME}"
+: "${CLUSTER_ISSUER_EMAIL:?Set CLUSTER_ISSUER_EMAIL}"
+: "${AWS_REGION:?Set AWS_REGION}"
+: "${S3_BUCKET:?Set S3_BUCKET}"
+: "${RUNNER_IMAGE_REF:?Set RUNNER_IMAGE_REF to the verified v0.199 runner image}"
+: "${RUNNER_MANAGER_IMAGE_REF:?Set RUNNER_MANAGER_IMAGE_REF to the patched v0.199-compatible runner-manager image}"
+: "${DAYTONA_API_KEY:?DAYTONA_API_KEY must be forwarded by devflow}"
+: "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN must be forwarded by devflow}"
+
+cd "$REPO_ROOT"
+actual_commit="$(git rev-parse HEAD)"
+[[ "$actual_commit" == "$EXPECTED_COMMIT" ]] \
+  || { echo "ERROR: expected HEAD $EXPECTED_COMMIT, found $actual_commit" >&2; exit 1; }
+[[ -z "$(git status --porcelain)" ]] \
+  || { echo "ERROR: worktree must be clean before provisioning" >&2; git status --short >&2; exit 1; }
+
+export DAYTONA_API_URL="${DAYTONA_API_URL:-https://app.daytona.io/api}"
+export RUNNER_AWS_CREDENTIAL_MODE="${RUNNER_AWS_CREDENTIAL_MODE:-static}"
+export DAYTONA_IMAGE_PROFILE="${DAYTONA_IMAGE_PROFILE:-v0.199-canary}"
+export AWS_NODE_VOLUME_SIZE_GB="${AWS_NODE_VOLUME_SIZE_GB:-250}"
+export RUNNER_MIN_COUNT="${RUNNER_MIN_COUNT:-3}"
+export RUNNER_MAX_COUNT="${RUNNER_MAX_COUNT:-10}"
+export RUNNER_SCALE_UP_THRESHOLD="${RUNNER_SCALE_UP_THRESHOLD:-25}"
+export RUNNER_SCALE_DOWN_THRESHOLD="${RUNNER_SCALE_DOWN_THRESHOLD:-75}"
+export RUNNER_MAXIMUM_CONCURRENT_INITIALIZING="${RUNNER_MAXIMUM_CONCURRENT_INITIALIZING:-2}"
+export RUNNER_MAXIMUM_CONCURRENT_DRAINING="${RUNNER_MAXIMUM_CONCURRENT_DRAINING:-1}"
+export RUNNER_SCALE_DOWN_STABILIZATION_SECONDS="${RUNNER_SCALE_DOWN_STABILIZATION_SECONDS:-30}"
+export CLUSTER_AUTOSCALER_CHART_VERSION="${CLUSTER_AUTOSCALER_CHART_VERSION:-9.58.0}"
+export OMC_NONINTERACTIVE=1 OMC_YES=1
+
+bash "$SCRIPT_DIR/preflight.sh"
+
+echo "=== Static gates ==="
+helm unittest charts/daytona-region
+for check in scripts/_lib/check/*.sh; do
+  bash "$check"
+done
+helm lint charts/daytona-region -f charts/daytona-region/tests/fixtures/baseline.values.yaml
+
+if [[ "${BUILD_RUNNER_IMAGE:-false}" == "true" ]]; then
+  runner_builder="build-runner-image.sh"
+  if [[ "${RUNNER_SOURCE_BUILD:-false}" == "true" ]]; then
+    runner_builder="build-runner-v0199-source.sh"
+  fi
+  IMAGE_REF="$RUNNER_IMAGE_REF" PUSH=true AWS_REGION="$AWS_REGION" \
+    bash "$SCRIPT_DIR/$runner_builder"
+else
+  registry="${RUNNER_IMAGE_REF%%/*}"
+  repository_and_tag="${RUNNER_IMAGE_REF#*/}"
+  repository="${repository_and_tag%:*}"
+  image_tag="${repository_and_tag##*:}"
+  if [[ "$registry" == *.dkr.ecr.*.amazonaws.com ]]; then
+    resolved_runner_digest="$(aws ecr describe-images --region "$AWS_REGION" --repository-name "$repository" \
+      --image-ids "imageTag=$image_tag" --query 'imageDetails[0].imageDigest' --output text)" \
+      || { echo "ERROR: runner image not found in ECR: $RUNNER_IMAGE_REF" >&2; exit 1; }
+    : "${RUNNER_IMAGE_DIGEST:?Set RUNNER_IMAGE_DIGEST to the sha256 digest produced by the verified build}"
+    [[ "$resolved_runner_digest" == "$RUNNER_IMAGE_DIGEST" ]] \
+      || { echo "ERROR: runner image digest mismatch: expected $RUNNER_IMAGE_DIGEST, found $resolved_runner_digest" >&2; exit 1; }
+  else
+    docker manifest inspect "$RUNNER_IMAGE_REF" >/dev/null \
+      || { echo "ERROR: runner image manifest not found: $RUNNER_IMAGE_REF" >&2; exit 1; }
+    resolved_runner_digest="${RUNNER_IMAGE_DIGEST:-registry-manifest-verified}"
+  fi
+  echo "Verified existing runner image: $RUNNER_IMAGE_REF ($resolved_runner_digest)"
+fi
+
+if [[ "${BUILD_RUNNER_MANAGER_IMAGE:-false}" == "true" ]]; then
+  : "${RUNNER_MANAGER_SOURCE_COMMIT:?BUILD_RUNNER_MANAGER_IMAGE=true requires RUNNER_MANAGER_SOURCE_COMMIT}"
+  IMAGE_REF="$RUNNER_MANAGER_IMAGE_REF" PUSH=true AWS_REGION="$AWS_REGION" \
+    RUNNER_MANAGER_SOURCE_COMMIT="$RUNNER_MANAGER_SOURCE_COMMIT" \
+    bash "$SCRIPT_DIR/build-runner-manager-source.sh"
+fi
+
+manager_registry="${RUNNER_MANAGER_IMAGE_REF%%/*}"
+manager_repository_and_tag="${RUNNER_MANAGER_IMAGE_REF#*/}"
+manager_repository="${manager_repository_and_tag%:*}"
+manager_image_tag="${manager_repository_and_tag##*:}"
+if [[ "$manager_registry" == *.dkr.ecr.*.amazonaws.com ]]; then
+  resolved_manager_digest="$(aws ecr describe-images --region "$AWS_REGION" --repository-name "$manager_repository" \
+    --image-ids "imageTag=$manager_image_tag" --query 'imageDetails[0].imageDigest' --output text)" \
+    || { echo "ERROR: runner-manager image not found in ECR: $RUNNER_MANAGER_IMAGE_REF" >&2; exit 1; }
+  if [[ "${BUILD_RUNNER_MANAGER_IMAGE:-false}" == "true" ]]; then
+    RUNNER_MANAGER_IMAGE_DIGEST="$resolved_manager_digest"
+  else
+    : "${RUNNER_MANAGER_IMAGE_DIGEST:?Set RUNNER_MANAGER_IMAGE_DIGEST to the verified source build digest}"
+    [[ "$resolved_manager_digest" == "$RUNNER_MANAGER_IMAGE_DIGEST" ]] \
+      || { echo "ERROR: runner-manager image digest mismatch: expected $RUNNER_MANAGER_IMAGE_DIGEST, found $resolved_manager_digest" >&2; exit 1; }
+  fi
+else
+  docker manifest inspect "$RUNNER_MANAGER_IMAGE_REF" >/dev/null \
+    || { echo "ERROR: runner-manager image manifest not found: $RUNNER_MANAGER_IMAGE_REF" >&2; exit 1; }
+  resolved_manager_digest="${RUNNER_MANAGER_IMAGE_DIGEST:-registry-manifest-verified}"
+fi
+echo "Verified existing runner-manager image: $RUNNER_MANAGER_IMAGE_REF ($resolved_manager_digest)"
+
+if [[ "${BUILD_RUNNER_IMAGE:-false}" == "true" ]]; then
+  registry="${RUNNER_IMAGE_REF%%/*}"
+  repository_and_tag="${RUNNER_IMAGE_REF#*/}"
+  repository="${repository_and_tag%:*}"
+  image_tag="${repository_and_tag##*:}"
+  resolved_runner_digest="$(aws ecr describe-images --region "$AWS_REGION" --repository-name "$repository" \
+    --image-ids "imageTag=$image_tag" --query 'imageDetails[0].imageDigest' --output text)"
+  [[ "$resolved_runner_digest" == sha256:* ]] \
+    || { echo "ERROR: pushed runner image digest could not be resolved" >&2; exit 1; }
+  echo "Built, validated, pushed, and resolved runner image: $RUNNER_IMAGE_REF ($resolved_runner_digest)"
+fi
+
+STATE_DIR="$SCRIPT_DIR/.state"
+mkdir -p "$STATE_DIR"
+umask 077
+prompts_tmp="$(mktemp "$STATE_DIR/prompts.env.XXXXXX")"
+trap 'rm -f "$prompts_tmp"' EXIT INT TERM
+{
+  printf 'export CLUSTER_NAME=%q\n' "$CLUSTER_NAME"
+  printf 'export BASE_DOMAIN=%q\n' "$BASE_DOMAIN"
+  printf 'export REGION_NAME=%q\n' "$REGION_NAME"
+  printf 'export CLUSTER_ISSUER_EMAIL=%q\n' "$CLUSTER_ISSUER_EMAIL"
+  printf 'export DAYTONA_API_URL=%q\n' "$DAYTONA_API_URL"
+  printf 'export AWS_REGION=%q\n' "$AWS_REGION"
+  printf 'export S3_BUCKET=%q\n' "$S3_BUCKET"
+  printf 'export RUNNER_AWS_CREDENTIAL_MODE=%q\n' "$RUNNER_AWS_CREDENTIAL_MODE"
+  printf 'export AWS_NODE_VOLUME_SIZE_GB=%q\n' "$AWS_NODE_VOLUME_SIZE_GB"
+  printf 'export RUNNER_MIN_COUNT=%q\n' "$RUNNER_MIN_COUNT"
+  printf 'export RUNNER_MAX_COUNT=%q\n' "$RUNNER_MAX_COUNT"
+  printf 'export RUNNER_SCALE_UP_THRESHOLD=%q\n' "$RUNNER_SCALE_UP_THRESHOLD"
+  printf 'export RUNNER_SCALE_DOWN_THRESHOLD=%q\n' "$RUNNER_SCALE_DOWN_THRESHOLD"
+  printf 'export RUNNER_MAXIMUM_CONCURRENT_INITIALIZING=%q\n' "$RUNNER_MAXIMUM_CONCURRENT_INITIALIZING"
+  printf 'export RUNNER_MAXIMUM_CONCURRENT_DRAINING=%q\n' "$RUNNER_MAXIMUM_CONCURRENT_DRAINING"
+  printf 'export RUNNER_SCALE_DOWN_STABILIZATION_SECONDS=%q\n' "$RUNNER_SCALE_DOWN_STABILIZATION_SECONDS"
+  printf 'export EKS_VERSION=%q\n' "${EKS_VERSION:-}"
+  printf 'export CLUSTER_AUTOSCALER_CHART_VERSION=%q\n' "$CLUSTER_AUTOSCALER_CHART_VERSION"
+  printf 'export CLUSTER_AUTOSCALER_IMAGE_TAG=%q\n' "${CLUSTER_AUTOSCALER_IMAGE_TAG:-}"
+  printf 'export DAYTONA_IMAGE_PROFILE=%q\n' "$DAYTONA_IMAGE_PROFILE"
+  printf 'export RUNNER_IMAGE_REF=%q\n' "$RUNNER_IMAGE_REF"
+  printf 'export RUNNER_MANAGER_IMAGE_REF=%q\n' "$RUNNER_MANAGER_IMAGE_REF"
+  [[ -n "${AWS_NODE_VM_SIZE:-}" ]] && printf 'export AWS_NODE_VM_SIZE=%q\n' "$AWS_NODE_VM_SIZE"
+} > "$prompts_tmp"
+chmod 600 "$prompts_tmp"
+mv "$prompts_tmp" "$STATE_DIR/prompts.env"
+trap - EXIT INT TERM
+
+bash "$SCRIPT_DIR/up.sh"
+bash "$SCRIPT_DIR/infra-test.sh"
+
+if [[ "${RUN_STAGE_C:-true}" == "true" ]]; then
+  : "${DAYTONA_ORG_ID:?RUN_STAGE_C=true requires DAYTONA_ORG_ID}"
+  DAYTONA_ORG_ID="$DAYTONA_ORG_ID" bash "$SCRIPT_DIR/test/ecr-setup.sh"
+  e2e_stage_c=false
+else
+  e2e_stage_c=true
+fi
+
+redact_stream() {
+  python3 -c '
+import os, sys
+secrets = [os.environ.get("DAYTONA_API_KEY", ""), os.environ.get("CLOUDFLARE_API_TOKEN", "")]
+secrets = [value for value in secrets if value]
+for line in sys.stdin:
+    for value in secrets:
+        line = line.replace(value, "[REDACTED]")
+    sys.stdout.write(line)
+'
+}
+
+e2e_report="$STATE_DIR/e2e-$(date -u +%Y%m%dT%H%M%SZ).log"
+SKIP_STAGE_C="$e2e_stage_c" bash "$SCRIPT_DIR/e2e.sh" 2>&1 \
+  | redact_stream | tee "$e2e_report"
+chmod 600 "$e2e_report"
+
+if [[ "${RUN_NETWORK_SMOKE:-true}" == "true" ]]; then
+  bash "$SCRIPT_DIR/network-e2e.sh"
+fi
+
+receipt="$STATE_DIR/deployment-receipt-$(date -u +%Y%m%dT%H%M%SZ).txt"
+{
+  echo "result=PASS"
+  echo "completed=$(date -u +%FT%TZ)"
+  echo "commit=$actual_commit"
+  echo "aws_account=$EXPECTED_AWS_ACCOUNT_ID"
+  echo "aws_region=$AWS_REGION"
+  echo "cluster=$CLUSTER_NAME"
+  echo "daytona_region=$REGION_NAME"
+  echo "runner_image=$RUNNER_IMAGE_REF"
+  echo "runner_image_digest=$resolved_runner_digest"
+  echo "runner_manager_image=$RUNNER_MANAGER_IMAGE_REF"
+  echo "runner_manager_image_digest=$resolved_manager_digest"
+  echo "runner_manager_source_commit=${RUNNER_MANAGER_SOURCE_COMMIT:-prebuilt-unrecorded}"
+  echo "runner_capacity_min=$RUNNER_MIN_COUNT"
+  echo "runner_capacity_max=$RUNNER_MAX_COUNT"
+  echo "cluster_autoscaler_chart=$CLUSTER_AUTOSCALER_CHART_VERSION"
+  echo "cluster_autoscaler_image=${CLUSTER_AUTOSCALER_IMAGE_TAG:-v${EKS_VERSION:-unknown}.0}"
+  echo "infra_receipts=$STATE_DIR/infra-test-*.log"
+  echo "e2e_receipt=$e2e_report"
+  echo "network_receipts=$STATE_DIR/network-smoke-*.log"
+  echo "teardown=NOT_RUN"
+} > "$receipt"
+chmod 600 "$receipt"
+echo "All deployment gates passed. Receipt: $receipt"
+echo "The deployment remains running; teardown requires an explicit operator action."

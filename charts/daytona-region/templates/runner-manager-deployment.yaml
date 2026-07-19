@@ -21,8 +21,10 @@ spec:
       app.kubernetes.io/component: runnermanager
   template:
     metadata:
-      {{- with .Values.services.runnermanager.podAnnotations }}
       annotations:
+        {{- include "daytona.imageBundleAnnotations" . | nindent 8 }}
+        daytona.io/image-version: {{ .Values.services.runnermanager.image.tag | default .Chart.AppVersion | quote }}
+      {{- with .Values.services.runnermanager.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
@@ -44,17 +46,55 @@ spec:
           imagePullPolicy: {{ .Values.services.runnermanager.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: 3010
+              containerPort: {{ .Values.services.runnermanager.env.API_PORT | default "3010" }}
               protocol: TCP
+          {{- if .Values.services.runnermanager.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.services.runnermanager.startupProbe.path | default "/health" }}
+              port: http
+            periodSeconds: {{ .Values.services.runnermanager.startupProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ .Values.services.runnermanager.startupProbe.timeoutSeconds | default 2 }}
+            failureThreshold: {{ .Values.services.runnermanager.startupProbe.failureThreshold | default 30 }}
+          {{- end }}
+          {{- if .Values.services.runnermanager.readinessProbe.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.services.runnermanager.readinessProbe.path | default "/health" }}
+              port: http
+            periodSeconds: {{ .Values.services.runnermanager.readinessProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ .Values.services.runnermanager.readinessProbe.timeoutSeconds | default 2 }}
+            failureThreshold: {{ .Values.services.runnermanager.readinessProbe.failureThreshold | default 3 }}
+          {{- end }}
+          {{- if .Values.services.runnermanager.livenessProbe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.services.runnermanager.livenessProbe.path | default "/health" }}
+              port: http
+            periodSeconds: {{ .Values.services.runnermanager.livenessProbe.periodSeconds | default 30 }}
+            timeoutSeconds: {{ .Values.services.runnermanager.livenessProbe.timeoutSeconds | default 2 }}
+            failureThreshold: {{ .Values.services.runnermanager.livenessProbe.failureThreshold | default 3 }}
+          {{- end }}
           env:
             - name: API_PORT
               value: {{ .Values.services.runnermanager.env.API_PORT | default "3010" | quote }}
-            # Floor of ready runners the manager maintains. Default 2 so a region
-            # NEVER runs on a single runner: when one is rolled/lost, a peer is
-            # already up for sandboxes to migrate onto. Pairs with the >=2 sandbox
-            # node pool (otherwise the extra runner pod has nowhere to schedule).
+            # Floor of ready runners the manager maintains. Pairs with the cloud
+            # sandbox node-pool minimum; each placeholder is anti-affined to one
+            # node and each node receives one DaemonSet runner.
             - name: MIN_RUNNERS
-              value: {{ .Values.services.runnermanager.env.MIN_RUNNERS | default "2" | quote }}
+              value: {{ .Values.services.runnermanager.env.MIN_RUNNERS | default "3" | quote }}
+            - name: MAX_RUNNERS
+              value: {{ .Values.services.runnermanager.env.MAX_RUNNERS | default "10" | quote }}
+            - name: SCALE_UP_THRESHOLD
+              value: {{ .Values.services.runnermanager.env.SCALE_UP_THRESHOLD | default "25" | quote }}
+            - name: SCALE_DOWN_THRESHOLD
+              value: {{ .Values.services.runnermanager.env.SCALE_DOWN_THRESHOLD | default "75" | quote }}
+            - name: MAXIMUM_CONCURRENT_INITIALIZING
+              value: {{ .Values.services.runnermanager.env.MAXIMUM_CONCURRENT_INITIALIZING | default "2" | quote }}
+            - name: MAXIMUM_CONCURRENT_DRAINING
+              value: {{ .Values.services.runnermanager.env.MAXIMUM_CONCURRENT_DRAINING | default "1" | quote }}
+            - name: SCALE_DOWN_STABILIZATION_SECONDS
+              value: {{ .Values.services.runnermanager.env.SCALE_DOWN_STABILIZATION_SECONDS | default "30" | quote }}
             # Daytona org API key (Bearer) — same value as daytonaApiKey / registration hook secret
             - name: API_TOKEN
               valueFrom:
@@ -79,7 +119,18 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.services.runnermanager.apiKeySecret.name }}
                   key: {{ required "services.runnermanager.apiKeySecret.key is required when apiKeySecret.name is set" .Values.services.runnermanager.apiKeySecret.key }}
+            {{- else }}
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "daytona.runnermanagerAuthSecretName" . }}
+                  key: {{ .Values.services.runnermanager.auth.apiKeyKey }}
             {{- end }}
+            - name: SYSTEM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "daytona.runnermanagerAuthSecretName" . }}
+                  key: {{ .Values.services.runnermanager.auth.systemApiTokenKey }}
             - name: SERVER_URL
               value: {{ .Values.services.runnermanager.env.SERVER_URL | default (required "daytonaApiUrl is required" .Values.daytonaApiUrl) | quote }}
             - name: REGION_ID

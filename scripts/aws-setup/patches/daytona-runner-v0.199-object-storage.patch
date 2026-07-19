@@ -1,0 +1,84 @@
+diff --git a/apps/runner/pkg/storage/minio_client.go b/apps/runner/pkg/storage/minio_client.go
+index f33938b..a496f5a 100644
+--- a/apps/runner/pkg/storage/minio_client.go
++++ b/apps/runner/pkg/storage/minio_client.go
+@@ -4,0 +5 @@ import (
++	"encoding/json"
+@@ -6,0 +8,2 @@ import (
++	"net/http"
++	"os"
+@@ -7,0 +11 @@ import (
++	"time"
+@@ -20,0 +25,8 @@ type minioClient struct {
++type storageAccess struct {
++	AccessKey    string `json:"accessKey"`
++	Secret       string `json:"secret"`
++	SessionToken string `json:"sessionToken"`
++	StorageURL   string `json:"storageUrl"`
++	Bucket       string `json:"bucket"`
++}
++
+@@ -32,0 +45,6 @@ func GetObjectStorageClient() (ObjectStorageClient, error) {
++	// SDK build contexts are uploaded to the control-plane object store.
++	// Fetch short-lived credentials per build when an org token is supplied.
++	if token := os.Getenv("OBJECT_STORAGE_API_TOKEN"); token != "" {
++		return getControlPlaneObjectStorageClient(runnerConfig.DaytonaApiUrl, token)
++	}
++
+@@ -38,0 +57 @@ func GetObjectStorageClient() (ObjectStorageClient, error) {
++	useSSL := strings.HasPrefix(endpoint, "https://")
+@@ -42,2 +60,0 @@ func GetObjectStorageClient() (ObjectStorageClient, error) {
+-	useSSL := strings.Contains(endpoint, "https")
+-
+@@ -64,0 +82,51 @@ func GetObjectStorageClient() (ObjectStorageClient, error) {
++func getControlPlaneObjectStorageClient(apiURL, token string) (ObjectStorageClient, error) {
++	if apiURL == "" {
++		return nil, fmt.Errorf("DAYTONA_API_URL is required for control-plane object storage")
++	}
++
++	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(apiURL, "/")+"/object-storage/push-access", nil)
++	if err != nil {
++		return nil, fmt.Errorf("failed to create storage access request: %w", err)
++	}
++	req.Header.Set("Authorization", "Bearer "+token)
++
++	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
++	if err != nil {
++		return nil, fmt.Errorf("failed to request storage access: %w", err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("storage access request returned HTTP %d", resp.StatusCode)
++	}
++
++	var access storageAccess
++	if err := json.NewDecoder(resp.Body).Decode(&access); err != nil {
++		return nil, fmt.Errorf("failed to decode storage access response: %w", err)
++	}
++
++	useSSL := strings.HasPrefix(access.StorageURL, "https://")
++	endpoint := strings.TrimPrefix(access.StorageURL, "http://")
++	endpoint = strings.TrimPrefix(endpoint, "https://")
++	region := "us-east-1"
++	parts := strings.Split(endpoint, ".")
++	if len(parts) >= 4 && parts[0] == "s3" && parts[2] == "amazonaws" {
++		region = parts[1]
++	}
++	if endpoint == "" || access.AccessKey == "" || access.Secret == "" || access.Bucket == "" {
++		return nil, fmt.Errorf("control-plane object storage response is incomplete")
++	}
++
++	client, err := minio.New(endpoint, &minio.Options{
++		Creds:  credentials.NewStaticV4(access.AccessKey, access.Secret, access.SessionToken),
++		Secure: useSSL,
++		Region: region,
++	})
++	if err != nil {
++		return nil, fmt.Errorf("failed to create control-plane S3 client: %w", err)
++	}
++	return &minioClient{
++		client:     client,
++		bucketName: access.Bucket,
++	}, nil
++}
++

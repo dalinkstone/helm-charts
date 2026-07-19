@@ -23,8 +23,10 @@ spec:
       maxUnavailable: 1
   template:
     metadata:
-      {{- with .Values.services.runner.podAnnotations }}
       annotations:
+        {{- include "daytona.imageBundleAnnotations" . | nindent 8 }}
+        daytona.io/image-version: {{ .Values.services.runner.image.tag | default .Chart.AppVersion | quote }}
+      {{- with .Values.services.runner.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
@@ -956,9 +958,21 @@ spec:
             - secretRef:
                 name: {{ include "daytona.fullname" . }}-region-config
                 optional: true
-          {{- with .Values.services.runner.extraEnv }}
+          {{- if or .Values.services.runnermanager.enabled .Values.services.runner.extraEnv }}
           env:
+            {{- if .Values.services.runnermanager.enabled }}
+            # runner-manager calls /system/config with this shared bootstrap
+            # token, then replaces the generic API token with the per-runner
+            # key returned by POST /api/runners.
+            - name: SYSTEM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "daytona.runnermanagerAuthSecretName" . }}
+                  key: {{ .Values.services.runnermanager.auth.systemApiTokenKey }}
+            {{- end }}
+          {{- with .Values.services.runner.extraEnv }}
             {{- include "daytona.tplvalues.render" (dict "value" . "context" $) | nindent 12 }}
+          {{- end }}
           {{- end }}
           volumeMounts:
             - name: var-lib-daytona

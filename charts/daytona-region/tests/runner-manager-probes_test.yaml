@@ -1,0 +1,47 @@
+suite: runner-manager health probes
+templates:
+  - runner-manager-deployment.yaml
+release:
+  name: test-release
+  namespace: test-ns
+tests:
+  - it: enables health probes on the configured API port
+    set:
+      regionName: "test"
+      proxyUrl: "https://proxy.example.com"
+      daytonaApiUrl: "https://api.example.com/api"
+      daytonaApiKey: "test"
+      services.runnermanager.env.API_PORT: "4010"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 4010
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.path
+          value: /health
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.port
+          value: http
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /health
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /health
+
+  - it: permits probes to be disabled
+    set:
+      regionName: "test"
+      proxyUrl: "https://proxy.example.com"
+      daytonaApiUrl: "https://api.example.com/api"
+      daytonaApiKey: "test"
+      services.runnermanager.startupProbe.enabled: false
+      services.runnermanager.readinessProbe.enabled: false
+      services.runnermanager.livenessProbe.enabled: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].startupProbe
+      - notExists:
+          path: spec.template.spec.containers[0].readinessProbe
+      - notExists:
+          path: spec.template.spec.containers[0].livenessProbe

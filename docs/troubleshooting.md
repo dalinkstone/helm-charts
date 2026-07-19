@@ -260,11 +260,29 @@ The registry's s3 driver (distribution v3) resumes blob uploads via `ListMultipa
 
 ## runnermanager ImagePullBackOff
 
-Not every chart `appVersion` has a published `daytonaio/daytona-runner-manager` tag (the tag lines are sparse: plain, `-k8s-oss`, `-byoc` flavors). Keep the chart's pinned default tag unless you have verified the override exists on Docker Hub.
+The chart defaults every version-coupled Daytona image to its `appVersion`,
+currently `v0.184.0-k8s-oss.3-amd64`. Docker Hub publishes that exact tag for
+proxy, runner (including its embedded sandbox daemon), snapshot-manager,
+ssh-gateway, and runner-manager. Do not override a single component in
+isolation. Plain `v0.184.0-amd64` and `v0.189.0-amd64` are incomplete bundles
+because no runner-manager image is published under those exact tags.
+
+For the v0.199 control-plane canary, use both verified private artifacts: the
+v0.199 runner and the patched runner-manager. The stock manager calls the
+removed `GET /runners/by-region/{id}` route and the internal
+`POST /admin/runners` route; an organization API key can use neither on
+v0.199. The patched manager instead uses `GET /runners?regionId=...` and
+`POST /runners`. Configure their immutable image references and digests in
+`canary.env`, then select `v0.199-canary`.
 
 ## Runner DaemonSet pod stuck `Pending` — `didn't have free ports`
 
-`services.runner.mainContainer.enabled: true` makes the DaemonSet bind hostPorts 3000/2220 on every sandbox node — the same ports the runner-manager's spawned pods need (hostNetwork). The manager's pods are also the only runners registered with Daytona Cloud, so the static ones add no capacity. Set `mainContainer.enabled: false` (sidecar-only host prep) whenever `runnermanager` is enabled.
+The chart-managed runner-manager does not spawn runner Deployments. It creates
+placeholder pods; the runner DaemonSet main container supplies one runner per
+sandbox node. Keep `services.runner.mainContainer.enabled: true` and delete any
+old/manual runner Deployments that still bind hostPorts 3000/2220 before
+cutting over. `infra-test.sh` rejects both standalone runner Deployments and the
+legacy `daytona-api-compat` rewrite proxy.
 
 ## Where to escalate
 
