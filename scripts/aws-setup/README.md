@@ -170,9 +170,18 @@ manages.
   the runner; with CPU over-provisioning a 32 vCPU pool comfortably hosts on the
   order of ~16 sandboxes at 4 vCPU / 4 GiB each.
 
-Scale up or down by changing the sandbox node pool (more/larger nodes →
-more/larger runner pods). For a cheap smoke test, a single small sandbox node
-is enough.
+The AWS flow defaults to three warm runner nodes and a maximum of ten. The
+runner-manager scales up from Daytona availability scores by creating an
+anti-affined placeholder Pod. Cluster Autoscaler turns a pending placeholder
+into an EKS managed-node-group scale-out, and the runner DaemonSet starts the
+runner on that node. The patched v0.199 manager scales down only completely
+idle runners: it makes one runner unschedulable, verifies zero assigned
+sandboxes twice, marks it draining, removes its placeholder, and lets Cluster
+Autoscaler retire the empty node after its unneeded delay.
+
+Set `RUNNER_MIN_COUNT` and `RUNNER_MAX_COUNT` before `up.sh` to change the
+shared runner/node envelope. The EKS node-group limits and runner-manager
+limits are rendered from the same values so they cannot silently diverge.
 
 ## What this setup requires
 
@@ -188,6 +197,13 @@ is enough.
 ## How to run
 
 ### Unattended canary (recommended)
+
+The v0.199 canary requires a private runner-manager image built from reviewed
+source. `build-runner-manager-source.sh` pins the exact source commit, uses the
+original upstream Dockerfile, verifies a linux/amd64 ELF, and optionally creates
+the ECR repository and pushes the image. It never decompiles a release image or
+runs `install.sh` on a node. A devflow sandbox without DIND should reuse a
+prebuilt ECR image and keep `BUILD_RUNNER_MANAGER_IMAGE=false`.
 
 The supported canary path is one command after filling a non-secret config
 file. Credentials stay in the environment and are never written to that file:
@@ -442,13 +458,11 @@ more to track and tear down.
 - **Single sandbox node pool, public subnets.** This setup provisions one
   node group in public subnets. Real fleets want sandbox nodes spread across
   multiple AZs and, typically, private subnets with tightened security groups.
-- **Cluster Autoscaler controller not installed.** The sandbox node group is
-  created with node-role autoscaler IAM access and explicit ASG discovery tags,
-  but this script does not install the controller. If Cluster Autoscaler is
-  installed separately, prefer a dedicated IRSA/Pod Identity role, configure
-  ASG auto-discovery for this cluster, tolerate `sandbox=true:NoSchedule` if it
-  runs on this node group, and keep its minor version aligned with EKS. The node
-  group can then scale from two to four nodes.
+- **Cluster Autoscaler is a separately versioned cluster component.** `up.sh`
+  installs chart `9.58.0`, explicitly overrides its image to `v1.36.0` for an
+  EKS 1.36 cluster, and gives its service account a dedicated tag-scoped IRSA
+  role. Override both versions together for another EKS minor. This workload
+  identity does not require IAM Identity Center/AWS SSO.
 - **Node root volume defaults to 250 GiB.** Override
   `AWS_NODE_VOLUME_SIZE_GB` before the first run when a different size is
   required. Existing EKS node group volumes are not resized by rerunning this

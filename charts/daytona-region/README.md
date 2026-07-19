@@ -339,6 +339,16 @@ autoscaler supplies nodes for those placeholders; the runner DaemonSet's
 manager discovers that DaemonSet pod, creates its Daytona Cloud runner record,
 and sends the returned per-runner API key to `/system/config`.
 
+`MIN_RUNNERS` and `MAX_RUNNERS` define the runner-manager envelope; the cloud
+node pool must use the same minimum and maximum. The manager samples Daytona
+availability scores, adds one placeholder below `SCALE_UP_THRESHOLD`, and the
+v0.199 compatibility build retires one completely idle runner above
+`SCALE_DOWN_THRESHOLD`. Retirement first disables scheduling, waits the
+configured stabilization period, verifies that no sandbox remains assigned,
+marks the runner draining, and only then removes its API record and placeholder.
+The Kubernetes Cluster Autoscaler, Karpenter, or another node provisioner is
+still required: the Daytona chart does not create cloud worker nodes itself.
+
 Accordingly, the K8s-native topology uses
 `services.runner.mainContainer.enabled: true`. The manager does **not** create
 standalone runner Deployments. A deployment that uses manual runner

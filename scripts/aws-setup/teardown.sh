@@ -129,6 +129,22 @@ if kubectl get ns daytona >/dev/null 2>&1; then
     || omc::log WARN "namespace daytona delete failed or absent"
 fi
 
+# Cluster Autoscaler is cluster infrastructure, separate from daytona-region.
+# Remove its Helm release and IRSA stack before deleting EKS so no IAM policy
+# attachment is left behind if cluster deletion is interrupted.
+if helm status cluster-autoscaler -n kube-system >/dev/null 2>&1; then
+  helm uninstall cluster-autoscaler -n kube-system --wait --timeout 5m \
+    && omc::log INFO "helm uninstalled cluster-autoscaler" \
+    || omc::log WARN "cluster-autoscaler helm uninstall failed"
+fi
+if eksctl get iamserviceaccount --cluster "$CLUSTER_NAME" --region "$AWS_REGION" \
+  --namespace kube-system --name cluster-autoscaler >/dev/null 2>&1; then
+  eksctl delete iamserviceaccount --cluster "$CLUSTER_NAME" --region "$AWS_REGION" \
+    --namespace kube-system --name cluster-autoscaler --wait --approve \
+    && omc::log INFO "Cluster Autoscaler IRSA service account deleted" \
+    || omc::log WARN "Cluster Autoscaler IRSA service-account delete failed; cluster deletion will retry stack cleanup"
+fi
+
 # === 2b. Release cloud load balancers BEFORE deleting the VPC ================
 # Service type=LoadBalancer (ingress-nginx-controller, ssh-gateway) provisions
 # ELBs whose ENIs + security groups pin the VPC. If they outlive the helm
@@ -219,6 +235,24 @@ if [[ -n "$ACCOUNT_ID" ]]; then
     aws iam delete-policy --policy-arn "$S3_POLICY_ARN" \
       && omc::log INFO "IAM policy $S3_POLICY_NAME deleted" \
       || omc::log WARN "IAM policy delete failed (still attached somewhere?)"
+  fi
+
+  # Dedicated Cluster Autoscaler IRSA policy. The eksctl-managed role should
+  # already be gone; defensively detach any remaining role before deletion.
+  CLUSTER_AUTOSCALER_POLICY_NAME="${CLUSTER_NAME}-cluster-autoscaler"
+  CLUSTER_AUTOSCALER_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${CLUSTER_AUTOSCALER_POLICY_NAME}"
+  if aws iam get-policy --policy-arn "$CLUSTER_AUTOSCALER_POLICY_ARN" >/dev/null 2>&1; then
+    while IFS= read -r role_name; do
+      [[ -n "$role_name" && "$role_name" != "None" ]] || continue
+      aws iam detach-role-policy --role-name "$role_name" --policy-arn "$CLUSTER_AUTOSCALER_POLICY_ARN" 2>/dev/null || true
+      if [[ "$role_name" == *-cluster-autoscaler ]]; then
+        aws iam delete-role --role-name "$role_name" 2>/dev/null || true
+      fi
+    done < <(aws iam list-entities-for-policy --policy-arn "$CLUSTER_AUTOSCALER_POLICY_ARN" \
+      --query 'PolicyRoles[].RoleName' --output text 2>/dev/null | tr '\t' '\n')
+    aws iam delete-policy --policy-arn "$CLUSTER_AUTOSCALER_POLICY_ARN" \
+      && omc::log INFO "IAM policy $CLUSTER_AUTOSCALER_POLICY_NAME deleted" \
+      || omc::log WARN "Cluster Autoscaler IAM policy delete failed"
   fi
 
   # IAM OIDC provider (created by eksctl `withOIDC`; NOT removed by cluster delete)

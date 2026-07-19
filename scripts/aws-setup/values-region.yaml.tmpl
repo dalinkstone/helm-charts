@@ -18,6 +18,7 @@
 #   PRIV_GATEWAY_B64             - base64 of the gateway HOST key file
 #   DAYTONA_*_IMAGE_TAG          - explicit component tags for a named canary
 #   RUNNER_IMAGE_*               - registry/repository/tag for the runner image
+#   RUNNER_*                     - shared runner-manager/EKS scaling policy
 
 imageBundle:
   name: "${DAYTONA_IMAGE_BUNDLE_NAME}"
@@ -188,3 +189,11 @@ services:
     auth:
       apiKey: "${RUNNER_MANAGER_API_KEY}"
       systemApiToken: "${RUNNER_SYSTEM_API_TOKEN}"
+    env:
+      MIN_RUNNERS: "${RUNNER_MIN_COUNT}"
+      MAX_RUNNERS: "${RUNNER_MAX_COUNT}"
+      SCALE_UP_THRESHOLD: "${RUNNER_SCALE_UP_THRESHOLD}"
+      SCALE_DOWN_THRESHOLD: "${RUNNER_SCALE_DOWN_THRESHOLD}"
+      MAXIMUM_CONCURRENT_INITIALIZING: "${RUNNER_MAXIMUM_CONCURRENT_INITIALIZING}"
+      MAXIMUM_CONCURRENT_DRAINING: "${RUNNER_MAXIMUM_CONCURRENT_DRAINING}"
+      SCALE_DOWN_STABILIZATION_SECONDS: "${RUNNER_SCALE_DOWN_STABILIZATION_SECONDS}"

@@ -1116,12 +1116,23 @@ spec:
           env:
             - name: API_PORT
               value: "3010"
-            # Floor of ready runners the manager maintains. Default 2 so a region
-            # NEVER runs on a single runner: when one is rolled/lost, a peer is
-            # already up for sandboxes to migrate onto. Pairs with the >=2 sandbox
-            # node pool (otherwise the extra runner pod has nowhere to schedule).
+            # Floor of ready runners the manager maintains. Pairs with the cloud
+            # sandbox node-pool minimum; each placeholder is anti-affined to one
+            # node and each node receives one DaemonSet runner.
             - name: MIN_RUNNERS
+              value: "3"
+            - name: MAX_RUNNERS
+              value: "10"
+            - name: SCALE_UP_THRESHOLD
+              value: "25"
+            - name: SCALE_DOWN_THRESHOLD
+              value: "75"
+            - name: MAXIMUM_CONCURRENT_INITIALIZING
               value: "2"
+            - name: MAXIMUM_CONCURRENT_DRAINING
+              value: "1"
+            - name: SCALE_DOWN_STABILIZATION_SECONDS
+              value: "30"
             # Daytona org API key (Bearer) — same value as daytonaApiKey / registration hook secret
             - name: API_TOKEN
               valueFrom:

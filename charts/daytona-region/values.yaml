@@ -413,10 +413,20 @@ services:
       systemApiToken: "system_secret_token"
     env:
       API_PORT: "3010"
-      # Floor of ready runners the manager keeps. 2 so the region never runs on a
-      # single runner — losing/rolling one always leaves a peer for sandboxes to
-      # migrate onto. Requires a sandbox node pool of >= MIN_RUNNERS nodes.
-      MIN_RUNNERS: "2"
+      # Floor of ready runners the manager keeps. Three leaves two healthy peers
+      # while one runner is draining or being replaced. The sandbox node pool
+      # minimum must match this value.
+      MIN_RUNNERS: "3"
+      # Hard ceiling enforced by runner-manager. The cloud node group's maximum
+      # must match this value or pending placeholders cannot be fulfilled.
+      MAX_RUNNERS: "10"
+      # Availability-score hysteresis: low scores add one placeholder; high
+      # scores retire one completely idle runner after the stabilization delay.
+      SCALE_UP_THRESHOLD: "25"
+      SCALE_DOWN_THRESHOLD: "75"
+      MAXIMUM_CONCURRENT_INITIALIZING: "2"
+      MAXIMUM_CONCURRENT_DRAINING: "1"
+      SCALE_DOWN_STABILIZATION_SECONDS: "30"
       PROVIDER_TYPE: "kubernetes"
       LOG_LEVEL: "info"
       POD_WAIT_TIMEOUT: "600"

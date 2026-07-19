@@ -23,6 +23,10 @@ omc::need_cmd aws kubectl helm jq yq curl openssl
 NAMESPACE="${NAMESPACE:-daytona}"
 RELEASE="${RELEASE:-daytona-region}"
 TIMEOUT="${INFRA_TEST_TIMEOUT:-600s}"
+RUNNER_MIN_COUNT="${RUNNER_MIN_COUNT:-3}"
+RUNNER_MAX_COUNT="${RUNNER_MAX_COUNT:-10}"
+CLUSTER_AUTOSCALER_CHART_VERSION="${CLUSTER_AUTOSCALER_CHART_VERSION:-9.58.0}"
+CLUSTER_AUTOSCALER_IMAGE_TAG="${CLUSTER_AUTOSCALER_IMAGE_TAG:-v${EKS_VERSION:-1.36}.0}"
 RECEIPT="${INFRA_TEST_RECEIPT:-$STATE_DIR/infra-test-$(date -u +%Y%m%dT%H%M%SZ).log}"
 mkdir -p "$STATE_DIR"
 umask 077
@@ -40,6 +44,7 @@ identity="$(aws sts get-caller-identity --output json)"
 account_id="$(jq -r '.Account' <<<"$identity")"
 principal_arn="$(jq -r '.Arn' <<<"$identity")"
 aws_region="$(jq -r '.services.runner.env.AWS_REGION // empty' <<<"$values")"
+[[ -n "${CLUSTER_NAME:-}" ]] || omc::die "CLUSTER_NAME is missing from $PROMPTS_FILE"
 
 echo "Daytona AWS live infrastructure test"
 echo "started=$(date -u +%FT%TZ) commit=$(git -C "$SCRIPT_DIR/../.." rev-parse HEAD)"
@@ -47,10 +52,36 @@ echo "account=$account_id principal=$principal_arn aws_region=$aws_region region
 
 nodes="$(kubectl get nodes -l daytona-sandbox-c=true -o json)"
 ready_nodes="$(jq '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length' <<<"$nodes")"
-(( ready_nodes >= 2 )) || omc::die "expected at least two Ready daytona-sandbox-c nodes; found $ready_nodes"
+(( ready_nodes >= RUNNER_MIN_COUNT )) || omc::die "expected at least $RUNNER_MIN_COUNT Ready daytona-sandbox-c nodes; found $ready_nodes"
 bad_taints="$(jq '[.items[] | select(any(.spec.taints[]?; .key == "sandbox" and .value == "true" and .effect == "NoSchedule") | not)] | length' <<<"$nodes")"
 (( bad_taints == 0 )) || omc::die "$bad_taints sandbox nodes lack sandbox=true:NoSchedule"
 echo "PASS nodes: $ready_nodes Ready, labelled, and correctly tainted"
+
+nodegroup_scaling="$(aws eks describe-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name sandbox \
+  --region "$aws_region" --query 'nodegroup.scalingConfig' --output json)"
+[[ "$(jq -r '.minSize' <<<"$nodegroup_scaling")" == "$RUNNER_MIN_COUNT" ]] \
+  || omc::die "sandbox node-group minimum does not match runner minimum $RUNNER_MIN_COUNT"
+[[ "$(jq -r '.maxSize' <<<"$nodegroup_scaling")" == "$RUNNER_MAX_COUNT" ]] \
+  || omc::die "sandbox node-group maximum does not match runner maximum $RUNNER_MAX_COUNT"
+
+autoscaler_chart="$(helm -n kube-system list -f '^cluster-autoscaler$' -o json \
+  | jq -r '.[0].chart // empty')"
+[[ "$autoscaler_chart" == "cluster-autoscaler-${CLUSTER_AUTOSCALER_CHART_VERSION}" ]] \
+  || omc::die "expected Cluster Autoscaler chart $CLUSTER_AUTOSCALER_CHART_VERSION; found ${autoscaler_chart:-absent}"
+kubectl -n kube-system rollout status deployment/cluster-autoscaler --timeout="$TIMEOUT"
+autoscaler="$(kubectl -n kube-system get deployment cluster-autoscaler -o json)"
+autoscaler_image="$(jq -r '.spec.template.spec.containers[0].image' <<<"$autoscaler")"
+[[ "$autoscaler_image" == *":${CLUSTER_AUTOSCALER_IMAGE_TAG}" ]] \
+  || omc::die "Cluster Autoscaler image '$autoscaler_image' does not use $CLUSTER_AUTOSCALER_IMAGE_TAG"
+autoscaler_args="$(jq -r '.spec.template.spec.containers[0].command[]?, .spec.template.spec.containers[0].args[]?' <<<"$autoscaler")"
+grep -Fq -- "--node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/$CLUSTER_NAME" <<<"$autoscaler_args" \
+  || omc::die "Cluster Autoscaler is not configured for tagged ASG auto-discovery of $CLUSTER_NAME"
+autoscaler_role="$(kubectl -n kube-system get serviceaccount cluster-autoscaler \
+  -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}')"
+[[ "$autoscaler_role" == arn:aws:iam::*:role/* ]] \
+  || omc::die "Cluster Autoscaler service account lacks an IRSA role annotation"
+kubectl -n kube-system get configmap cluster-autoscaler-status >/dev/null
+echo "PASS autoscaling actuator: node-group=$RUNNER_MIN_COUNT..$RUNNER_MAX_COUNT chart=$CLUSTER_AUTOSCALER_CHART_VERSION image=$CLUSTER_AUTOSCALER_IMAGE_TAG IRSA=enabled"
 
 components=(proxy snapshot-manager ssh-gateway)
 if kubectl -n "$NAMESPACE" get deploy \
@@ -75,7 +106,7 @@ echo "PASS rollouts: ${#components[@]} Deployments and runner DaemonSet"
 runner_pod_count="$(kubectl -n "$NAMESPACE" get pods \
   -l 'app.kubernetes.io/component=runner,daytona.io/runner=true' -o json \
   | jq '[.items[] | select(.status.phase == "Running") | select(any(.status.containerStatuses[]?; .name == "runner" and .ready == true))] | length')"
-(( runner_pod_count >= 2 )) || omc::die "expected at least two running runner pods; found $runner_pod_count"
+(( runner_pod_count >= RUNNER_MIN_COUNT )) || omc::die "expected at least $RUNNER_MIN_COUNT running runner pods; found $runner_pod_count"
 echo "PASS runner pods: $runner_pod_count running"
 
 certificates="$(kubectl -n "$NAMESPACE" get certificate -o json)"
@@ -125,6 +156,13 @@ if ((${#components[@]} == 4)); then
     | jq -r '.items[0].spec.template.spec.containers[] | select(.name == "runnermanager") | .image')"
   [[ "$manager_image" == "$expected_manager_image" ]] \
     || omc::die "runner-manager runs '$manager_image', expected '$expected_manager_image'"
+  manager_env="$(kubectl -n "$NAMESPACE" get deploy \
+    -l 'app.kubernetes.io/component=runnermanager' -o json \
+    | jq '.items[0].spec.template.spec.containers[] | select(.name == "runnermanager") | .env')"
+  [[ "$(jq -r '.[] | select(.name == "MIN_RUNNERS") | .value' <<<"$manager_env")" == "$RUNNER_MIN_COUNT" ]] \
+    || omc::die "runner-manager MIN_RUNNERS does not match node-group minimum $RUNNER_MIN_COUNT"
+  [[ "$(jq -r '.[] | select(.name == "MAX_RUNNERS") | .value' <<<"$manager_env")" == "$RUNNER_MAX_COUNT" ]] \
+    || omc::die "runner-manager MAX_RUNNERS does not match node-group maximum $RUNNER_MAX_COUNT"
 
   # The v0.199 compatibility path is entirely chart-managed: runner processes
   # live in the DaemonSet, never ad-hoc Deployments, and no route-rewrite proxy
@@ -155,7 +193,7 @@ ready_runners="$(jq --arg id "$region_id" --arg name "$REGION_NAME" '
   (if type == "array" then . else (.items // .result // .data // []) end)
   | [.[] | select(((.regionId // (if (.region | type) == "object" then .region.id else .region end)) == $id or .region == $name) and .state == "ready" and (.unschedulable != true) and (.draining != true))]
   | length' <<<"$runners_json")"
-(( ready_runners >= 2 )) || omc::die "expected at least two ready Daytona runners for $REGION_NAME; found $ready_runners"
+(( ready_runners >= RUNNER_MIN_COUNT )) || omc::die "expected at least $RUNNER_MIN_COUNT ready Daytona runners for $REGION_NAME; found $ready_runners"
 echo "PASS Daytona registration: region=$region_id ready_runners=$ready_runners"
 
 if [[ -n "${EXPECTED_RUNNER_APP_VERSION:-}" ]]; then
@@ -163,8 +201,8 @@ if [[ -n "${EXPECTED_RUNNER_APP_VERSION:-}" ]]; then
     (if type == "array" then . else (.items // .result // .data // []) end)
     | [.[] | select((.regionId // (if (.region | type) == "object" then .region.id else .region end)) == $id and .state == "ready" and .appVersion == $version)]
     | length' <<<"$runners_json")"
-  (( matching_versions >= 2 )) \
-    || omc::die "expected two ready runners at appVersion $EXPECTED_RUNNER_APP_VERSION; found $matching_versions"
+  (( matching_versions >= RUNNER_MIN_COUNT )) \
+    || omc::die "expected $RUNNER_MIN_COUNT ready runners at appVersion $EXPECTED_RUNNER_APP_VERSION; found $matching_versions"
   echo "PASS runner app version: $matching_versions ready runners report $EXPECTED_RUNNER_APP_VERSION"
 fi
 

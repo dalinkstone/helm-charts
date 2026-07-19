@@ -78,12 +78,23 @@ spec:
           env:
             - name: API_PORT
               value: {{ .Values.services.runnermanager.env.API_PORT | default "3010" | quote }}
-            # Floor of ready runners the manager maintains. Default 2 so a region
-            # NEVER runs on a single runner: when one is rolled/lost, a peer is
-            # already up for sandboxes to migrate onto. Pairs with the >=2 sandbox
-            # node pool (otherwise the extra runner pod has nowhere to schedule).
+            # Floor of ready runners the manager maintains. Pairs with the cloud
+            # sandbox node-pool minimum; each placeholder is anti-affined to one
+            # node and each node receives one DaemonSet runner.
             - name: MIN_RUNNERS
-              value: {{ .Values.services.runnermanager.env.MIN_RUNNERS | default "2" | quote }}
+              value: {{ .Values.services.runnermanager.env.MIN_RUNNERS | default "3" | quote }}
+            - name: MAX_RUNNERS
+              value: {{ .Values.services.runnermanager.env.MAX_RUNNERS | default "10" | quote }}
+            - name: SCALE_UP_THRESHOLD
+              value: {{ .Values.services.runnermanager.env.SCALE_UP_THRESHOLD | default "25" | quote }}
+            - name: SCALE_DOWN_THRESHOLD
+              value: {{ .Values.services.runnermanager.env.SCALE_DOWN_THRESHOLD | default "75" | quote }}
+            - name: MAXIMUM_CONCURRENT_INITIALIZING
+              value: {{ .Values.services.runnermanager.env.MAXIMUM_CONCURRENT_INITIALIZING | default "2" | quote }}
+            - name: MAXIMUM_CONCURRENT_DRAINING
+              value: {{ .Values.services.runnermanager.env.MAXIMUM_CONCURRENT_DRAINING | default "1" | quote }}
+            - name: SCALE_DOWN_STABILIZATION_SECONDS
+              value: {{ .Values.services.runnermanager.env.SCALE_DOWN_STABILIZATION_SECONDS | default "30" | quote }}
             # Daytona org API key (Bearer) — same value as daytonaApiKey / registration hook secret
             - name: API_TOKEN
               valueFrom:

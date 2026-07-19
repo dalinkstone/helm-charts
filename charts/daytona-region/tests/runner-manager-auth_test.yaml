@@ -43,6 +43,61 @@ tests:
           path: 'spec.template.spec.containers[0].env[?(@.name=="SYSTEM_API_TOKEN")].valueFrom.secretKeyRef.name'
           value: test-release-daytona-region-runnermanager-auth
 
+  - it: configures bounded runner autoscaling with safe defaults
+    template: runner-manager-deployment.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MIN_RUNNERS")].value'
+          value: "3"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MAX_RUNNERS")].value'
+          value: "10"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_UP_THRESHOLD")].value'
+          value: "25"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_DOWN_THRESHOLD")].value'
+          value: "75"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MAXIMUM_CONCURRENT_DRAINING")].value'
+          value: "1"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_DOWN_STABILIZATION_SECONDS")].value'
+          value: "30"
+
+  - it: accepts customer runner autoscaling limits and thresholds
+    template: runner-manager-deployment.yaml
+    set:
+      regionName: test
+      proxyUrl: https://proxy.example.com
+      daytonaApiUrl: https://api.example.com/api
+      daytonaApiKey: organization-key
+      services.runnermanager.env.MIN_RUNNERS: "5"
+      services.runnermanager.env.MAX_RUNNERS: "50"
+      services.runnermanager.env.SCALE_UP_THRESHOLD: "20"
+      services.runnermanager.env.SCALE_DOWN_THRESHOLD: "80"
+      services.runnermanager.env.MAXIMUM_CONCURRENT_INITIALIZING: "4"
+      services.runnermanager.env.MAXIMUM_CONCURRENT_DRAINING: "2"
+      services.runnermanager.env.SCALE_DOWN_STABILIZATION_SECONDS: "60"
+    asserts:
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MIN_RUNNERS")].value'
+          value: "5"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="MAX_RUNNERS")].value'
+          value: "50"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_UP_THRESHOLD")].value'
+          value: "20"
+      - equal:
+          path: 'spec.template.spec.containers[0].env[?(@.name=="SCALE_DOWN_THRESHOLD")].value'
+          value: "80"
+
   - it: runner reads the same system token as the manager
     template: runner-daemonset.yaml
     set:

@@ -40,6 +40,14 @@ export DAYTONA_API_URL="${DAYTONA_API_URL:-https://app.daytona.io/api}"
 export RUNNER_AWS_CREDENTIAL_MODE="${RUNNER_AWS_CREDENTIAL_MODE:-static}"
 export DAYTONA_IMAGE_PROFILE="${DAYTONA_IMAGE_PROFILE:-v0.199-canary}"
 export AWS_NODE_VOLUME_SIZE_GB="${AWS_NODE_VOLUME_SIZE_GB:-250}"
+export RUNNER_MIN_COUNT="${RUNNER_MIN_COUNT:-3}"
+export RUNNER_MAX_COUNT="${RUNNER_MAX_COUNT:-10}"
+export RUNNER_SCALE_UP_THRESHOLD="${RUNNER_SCALE_UP_THRESHOLD:-25}"
+export RUNNER_SCALE_DOWN_THRESHOLD="${RUNNER_SCALE_DOWN_THRESHOLD:-75}"
+export RUNNER_MAXIMUM_CONCURRENT_INITIALIZING="${RUNNER_MAXIMUM_CONCURRENT_INITIALIZING:-2}"
+export RUNNER_MAXIMUM_CONCURRENT_DRAINING="${RUNNER_MAXIMUM_CONCURRENT_DRAINING:-1}"
+export RUNNER_SCALE_DOWN_STABILIZATION_SECONDS="${RUNNER_SCALE_DOWN_STABILIZATION_SECONDS:-30}"
+export CLUSTER_AUTOSCALER_CHART_VERSION="${CLUSTER_AUTOSCALER_CHART_VERSION:-9.58.0}"
 export OMC_NONINTERACTIVE=1 OMC_YES=1
 
 bash "$SCRIPT_DIR/preflight.sh"
@@ -78,6 +86,13 @@ else
   echo "Verified existing runner image: $RUNNER_IMAGE_REF ($resolved_runner_digest)"
 fi
 
+if [[ "${BUILD_RUNNER_MANAGER_IMAGE:-false}" == "true" ]]; then
+  : "${RUNNER_MANAGER_SOURCE_COMMIT:?BUILD_RUNNER_MANAGER_IMAGE=true requires RUNNER_MANAGER_SOURCE_COMMIT}"
+  IMAGE_REF="$RUNNER_MANAGER_IMAGE_REF" PUSH=true AWS_REGION="$AWS_REGION" \
+    RUNNER_MANAGER_SOURCE_COMMIT="$RUNNER_MANAGER_SOURCE_COMMIT" \
+    bash "$SCRIPT_DIR/build-runner-manager-source.sh"
+fi
+
 manager_registry="${RUNNER_MANAGER_IMAGE_REF%%/*}"
 manager_repository_and_tag="${RUNNER_MANAGER_IMAGE_REF#*/}"
 manager_repository="${manager_repository_and_tag%:*}"
@@ -86,9 +101,13 @@ if [[ "$manager_registry" == *.dkr.ecr.*.amazonaws.com ]]; then
   resolved_manager_digest="$(aws ecr describe-images --region "$AWS_REGION" --repository-name "$manager_repository" \
     --image-ids "imageTag=$manager_image_tag" --query 'imageDetails[0].imageDigest' --output text)" \
     || { echo "ERROR: runner-manager image not found in ECR: $RUNNER_MANAGER_IMAGE_REF" >&2; exit 1; }
-  : "${RUNNER_MANAGER_IMAGE_DIGEST:?Set RUNNER_MANAGER_IMAGE_DIGEST to the verified source build digest}"
-  [[ "$resolved_manager_digest" == "$RUNNER_MANAGER_IMAGE_DIGEST" ]] \
-    || { echo "ERROR: runner-manager image digest mismatch: expected $RUNNER_MANAGER_IMAGE_DIGEST, found $resolved_manager_digest" >&2; exit 1; }
+  if [[ "${BUILD_RUNNER_MANAGER_IMAGE:-false}" == "true" ]]; then
+    RUNNER_MANAGER_IMAGE_DIGEST="$resolved_manager_digest"
+  else
+    : "${RUNNER_MANAGER_IMAGE_DIGEST:?Set RUNNER_MANAGER_IMAGE_DIGEST to the verified source build digest}"
+    [[ "$resolved_manager_digest" == "$RUNNER_MANAGER_IMAGE_DIGEST" ]] \
+      || { echo "ERROR: runner-manager image digest mismatch: expected $RUNNER_MANAGER_IMAGE_DIGEST, found $resolved_manager_digest" >&2; exit 1; }
+  fi
 else
   docker manifest inspect "$RUNNER_MANAGER_IMAGE_REF" >/dev/null \
     || { echo "ERROR: runner-manager image manifest not found: $RUNNER_MANAGER_IMAGE_REF" >&2; exit 1; }
@@ -123,6 +142,16 @@ trap 'rm -f "$prompts_tmp"' EXIT INT TERM
   printf 'export S3_BUCKET=%q\n' "$S3_BUCKET"
   printf 'export RUNNER_AWS_CREDENTIAL_MODE=%q\n' "$RUNNER_AWS_CREDENTIAL_MODE"
   printf 'export AWS_NODE_VOLUME_SIZE_GB=%q\n' "$AWS_NODE_VOLUME_SIZE_GB"
+  printf 'export RUNNER_MIN_COUNT=%q\n' "$RUNNER_MIN_COUNT"
+  printf 'export RUNNER_MAX_COUNT=%q\n' "$RUNNER_MAX_COUNT"
+  printf 'export RUNNER_SCALE_UP_THRESHOLD=%q\n' "$RUNNER_SCALE_UP_THRESHOLD"
+  printf 'export RUNNER_SCALE_DOWN_THRESHOLD=%q\n' "$RUNNER_SCALE_DOWN_THRESHOLD"
+  printf 'export RUNNER_MAXIMUM_CONCURRENT_INITIALIZING=%q\n' "$RUNNER_MAXIMUM_CONCURRENT_INITIALIZING"
+  printf 'export RUNNER_MAXIMUM_CONCURRENT_DRAINING=%q\n' "$RUNNER_MAXIMUM_CONCURRENT_DRAINING"
+  printf 'export RUNNER_SCALE_DOWN_STABILIZATION_SECONDS=%q\n' "$RUNNER_SCALE_DOWN_STABILIZATION_SECONDS"
+  printf 'export EKS_VERSION=%q\n' "${EKS_VERSION:-}"
+  printf 'export CLUSTER_AUTOSCALER_CHART_VERSION=%q\n' "$CLUSTER_AUTOSCALER_CHART_VERSION"
+  printf 'export CLUSTER_AUTOSCALER_IMAGE_TAG=%q\n' "${CLUSTER_AUTOSCALER_IMAGE_TAG:-}"
   printf 'export DAYTONA_IMAGE_PROFILE=%q\n' "$DAYTONA_IMAGE_PROFILE"
   printf 'export RUNNER_IMAGE_REF=%q\n' "$RUNNER_IMAGE_REF"
   printf 'export RUNNER_MANAGER_IMAGE_REF=%q\n' "$RUNNER_MANAGER_IMAGE_REF"
@@ -177,6 +206,11 @@ receipt="$STATE_DIR/deployment-receipt-$(date -u +%Y%m%dT%H%M%SZ).txt"
   echo "runner_image_digest=$resolved_runner_digest"
   echo "runner_manager_image=$RUNNER_MANAGER_IMAGE_REF"
   echo "runner_manager_image_digest=$resolved_manager_digest"
+  echo "runner_manager_source_commit=${RUNNER_MANAGER_SOURCE_COMMIT:-prebuilt-unrecorded}"
+  echo "runner_capacity_min=$RUNNER_MIN_COUNT"
+  echo "runner_capacity_max=$RUNNER_MAX_COUNT"
+  echo "cluster_autoscaler_chart=$CLUSTER_AUTOSCALER_CHART_VERSION"
+  echo "cluster_autoscaler_image=${CLUSTER_AUTOSCALER_IMAGE_TAG:-v${EKS_VERSION:-unknown}.0}"
   echo "infra_receipts=$STATE_DIR/infra-test-*.log"
   echo "e2e_receipt=$e2e_report"
   echo "network_receipts=$STATE_DIR/network-smoke-*.log"

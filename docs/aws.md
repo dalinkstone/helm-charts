@@ -82,11 +82,11 @@ source-level patch from private `daytonaio/daytona-ai` branch
 `codex/runner-manager-v0199-api-fix` and publish it to a dedicated private
 repository, then configure both artifacts:
 
-The current canary image was built from patch commit
+The current canary image was built from original Go source at patch commit
 `9cb17eecc8af34b60347db181d0edbb1c63a1bd3`, directly on top of the official
 image's provenance commit `5b6d876856e3f89d767c353882272d5ba7d7b4f1`,
 using the original `apps/runner-manager/Dockerfile` rather than modifying an
-image layer or running `install.sh`:
+image layer, decompiling the public image binary, or running `install.sh`:
 
 ```bash
 docker buildx build \
@@ -105,6 +105,36 @@ digest
 This is a private compatibility build, not an official Daytona Docker Hub
 release.
 
+Automatic idle-capacity scale-down is implemented by the follow-up source
+commit `3fc5b6daeab06b13bc97edc3cf378bf15f78c588`. Build that exact commit with
+`scripts/aws-setup/build-runner-manager-source.sh` and publish it under a new
+tag such as `v0.184.0-k8s-oss.5-v0199-api-autoscale-amd64`; never overwrite the
+earlier immutable API-only artifact. The new manager defaults to 3–10 runners,
+uses 25/75 availability-score hysteresis, and only retires a runner after two
+zero-sandbox checks around an unschedulable stabilization window.
+
+The reproducibility build completed locally as `linux/amd64` from that exact
+commit using the original Dockerfile. Its local OCI manifest digest is
+`sha256:9c490d223887204bd8f006ecab70e58e4512dbbcb3c932bec4ae75deeac9fe58`
+and the extracted runner-manager binary SHA-256 is
+`15a0f2469913bd76d4df1dff74b36c77f93c8f91c0be25fa7c1485b5ecf93e73`.
+Record the ECR digest separately after pushing; do not assume a registry digest
+until ECR confirms it.
+
+Build and publish the new manager from a Docker-capable workstation or DIND
+builder before launching a non-DIND devflow deployment:
+
+```bash
+export IMAGE_REF=<account>.dkr.ecr.<region>.amazonaws.com/daytona-runner-manager:v0.184.0-k8s-oss.5-v0199-api-autoscale-amd64
+export RUNNER_MANAGER_SOURCE_COMMIT=3fc5b6daeab06b13bc97edc3cf378bf15f78c588
+export AWS_REGION=<region>
+PUSH=true bash scripts/aws-setup/build-runner-manager-source.sh
+```
+
+Alternatively, set `BUILD_RUNNER_MANAGER_IMAGE=true` in `canary.env` only when
+the deployment environment has a working Docker daemon. Copy the ECR-reported
+digest into `RUNNER_MANAGER_IMAGE_DIGEST` when reusing the prebuilt image.
+
 ```bash
 export RUNNER_IMAGE_REF=<account>.dkr.ecr.<region>.amazonaws.com/daytona-runner:<tag>
 export RUNNER_MANAGER_IMAGE_REF=<account>.dkr.ecr.<region>.amazonaws.com/daytona-runner-manager:<tag>
@@ -122,16 +152,17 @@ vCPU requirement and your regional quota, unless you override it with
 
 ## What the script does (step by step)
 
-1. **EKS cluster** via `eksctl` with `iam.withOIDC: true` and a managed sandbox node group labeled `daytona-sandbox-c=true` + tainted `sandbox=true:NoSchedule` on **Ubuntu 24.04** (`amiFamily: Ubuntu2404`). The node group starts with two nodes, keeps a minimum of two, allows scale-out to four, carries Cluster Autoscaler discovery/IAM configuration, and defaults to a 250 GiB root volume. The setup does not install the autoscaler controller. ~15 min. After cluster create, an explicit `omc::verify_node_ubuntu "24.04"` gate fails-fast if any sandbox node is on a different Ubuntu version — no exceptions, no override flag.
+1. **EKS cluster** via `eksctl` with `iam.withOIDC: true` and a managed sandbox node group labeled `daytona-sandbox-c=true` + tainted `sandbox=true:NoSchedule` on **Ubuntu 24.04** (`amiFamily: Ubuntu2404`). The shared runner/node capacity defaults to minimum/desired 3 and maximum 10, with Cluster Autoscaler discovery tags and a 250 GiB root volume. ~15 min. After cluster create, an explicit `omc::verify_node_ubuntu "24.04"` gate fails-fast if any sandbox node is on a different Ubuntu version — no exceptions, no override flag.
 2. **S3 bucket** with public access blocked by default.
 3. **IAM**: either an IAM user with access keys (static mode) OR an IAM role with an IRSA trust policy bound to the runner ServiceAccount (irsa mode). The minimum S3 policy is attached either way.
 4. **kubeconfig** via `aws eks update-kubeconfig`.
-5. **daytona namespace** created.
-6. **ingress-nginx** + **cert-manager** installed via helm. A `letsencrypt-prod` ClusterIssuer with HTTP-01 challenge is applied.
-7. **LoadBalancer wait**: the script polls the `ingress-nginx-controller` Service until the AWS NLB hostname is allocated. ~3-5 min.
-8. **DNS records**: the script prints exactly the records you must create. Create them in Route53 (or your DNS provider) and wait for propagation (~30-300s).
-9. **SSH gateway keypairs** generated into `.state/`, then **values-region.yaml render** from `scripts/aws-setup/values-region.yaml.tmpl` with your prompt answers. The snapshot-manager uses REAL AWS S3 (`storage.driver: s3`) — the one backend with the full multipart semantics the registry needs; runners share the same bucket for backups + build context.
-10. **`helm install daytona-region`** waits up to 10 min for the proxy + snapshot-manager + runner DaemonSet to come up, then the **post-registration finalize** (`omc::region_sshgateway_finalize`) fetches the region-scoped ssh-gateway api key (an org key 403s on session validation), rolls it into the release (`.state/values-sshgateway-key.yaml`), bounces the gateway pod, and PATCHes the region's `sshGatewayUrl` with the gateway LoadBalancer address.
+5. **Cluster Autoscaler** chart `9.58.0` with image `v1.36.0` is installed into `kube-system` for EKS 1.36. Its dedicated IRSA role can mutate only ASGs carrying this cluster's autoscaler tags. It converts pending runner-manager placeholders into managed-node-group scale-out and later removes nodes whose placeholders were safely retired.
+6. **daytona namespace** created.
+7. **ingress-nginx** + **cert-manager** installed via helm. A `letsencrypt-prod` ClusterIssuer with HTTP-01 challenge is applied.
+8. **LoadBalancer wait**: the script polls the `ingress-nginx-controller` Service until the AWS NLB hostname is allocated. ~3-5 min.
+9. **DNS records**: the script prints exactly the records you must create. Create them in Route53 (or your DNS provider) and wait for propagation (~30-300s).
+10. **SSH gateway keypairs** generated into `.state/`, then **values-region.yaml render** from `scripts/aws-setup/values-region.yaml.tmpl` with your prompt answers. The snapshot-manager uses REAL AWS S3 (`storage.driver: s3`) — the one backend with the full multipart semantics the registry needs; runners share the same bucket for backups + build context.
+11. **`helm install daytona-region`** waits up to 10 min for the proxy + snapshot-manager + runner DaemonSet to come up, then the **post-registration finalize** (`omc::region_sshgateway_finalize`) fetches the region-scoped ssh-gateway api key (an org key 403s on session validation), rolls it into the release (`.state/values-sshgateway-key.yaml`), bounces the gateway pod, and PATCHes the region's `sshGatewayUrl` with the gateway LoadBalancer address.
 
 ## Verify
 
