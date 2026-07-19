@@ -40,6 +40,29 @@ git -C "$source_root" apply --unidiff-zero --check "$PATCH_FILE"
 git -C "$source_root" apply --unidiff-zero "$PATCH_FILE"
 git -C "$source_root" diff --check
 
+# The upstream v0.199.0 tag intentionally ignores go.work.sum, but
+# hack/computer-use/Dockerfile still copies that file into its build context.
+# Generate the checksum from the exact tagged workspace with its declared Go
+# toolchain. An empty placeholder or a checksum copied from another revision
+# can hide dependency drift and will fail later in the Docker build.
+if [[ ! -s "$source_root/go.work.sum" ]]; then
+  go_workspace_version="$(awk '$1 == "go" { print $2; exit }' "$source_root/go.work")"
+  [[ "$go_workspace_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
+    || { echo "ERROR: could not determine Go version from $source_root/go.work" >&2; exit 1; }
+  echo "Generating missing go.work.sum with Go $go_workspace_version..." >&2
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --env HOME=/tmp \
+    --env GOCACHE=/tmp/go-build \
+    --env GOMODCACHE=/tmp/go-mod \
+    --volume "$source_root:/src" \
+    --workdir /src \
+    "golang:$go_workspace_version" \
+    go list -mod=readonly all >/dev/null
+fi
+[[ -s "$source_root/go.work.sum" ]] \
+  || { echo "ERROR: failed to generate $source_root/go.work.sum" >&2; exit 1; }
+
 echo "Building the upstream computer-use artifact for linux/amd64..." >&2
 docker build --platform linux/amd64 \
   --tag "$computer_use_image" \
