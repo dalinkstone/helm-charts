@@ -139,13 +139,12 @@ services:
       registry: "${RUNNER_IMAGE_REGISTRY}"
       repository: "${RUNNER_IMAGE_REPOSITORY}"
       tag: "${RUNNER_IMAGE_TAG}"
-    # The runner-manager owns the real (cloud-registered) runner pods; they
-    # envFrom runner-config/runner-secrets and bind hostPorts 3000/2220. A
-    # static mainContainer runner never registers with Daytona Cloud and
-    # would fight the manager's pods for those hostPorts — keep the
-    # DaemonSet sidecar-only (host prep: docker + daemon binaries).
+    # The manager creates one placeholder pod per desired runner. Kubernetes
+    # then schedules a sandbox node, and this DaemonSet supplies the actual
+    # runner process on that node. This is the upstream runner-manager design;
+    # the manager does not create a separate runner Deployment.
     mainContainer:
-      enabled: false
+      enabled: true
     ports:
       api: 3000
       ssh: 2220
@@ -183,4 +182,9 @@ services:
 
   runnermanager:
     image:
+      registry: "${RUNNER_MANAGER_IMAGE_REGISTRY}"
+      repository: "${RUNNER_MANAGER_IMAGE_REPOSITORY}"
       tag: "${DAYTONA_RUNNER_MANAGER_IMAGE_TAG}"
+    auth:
+      apiKey: "${RUNNER_MANAGER_API_KEY}"
+      systemApiToken: "${RUNNER_SYSTEM_API_TOKEN}"

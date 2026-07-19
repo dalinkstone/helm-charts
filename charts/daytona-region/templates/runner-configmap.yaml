@@ -25,5 +25,7 @@ data:
   # into runner pods via envFrom by the runner-manager.
   # Static
   DAEMON_BINARIES_DIR: "/var/lib/daytona/binaries"
-  CONFIG_FILE_PATH: {{ .Values.services.runner.env.CONFIG_FILE_PATH | default "/host-token/token.txt" | quote }}
+  # Persist the per-runner API key on the host-backed /var/lib/daytona mount so
+  # a runner container restart does not revert to the generic bootstrap token.
+  CONFIG_FILE_PATH: {{ .Values.services.runner.env.CONFIG_FILE_PATH | default "/var/lib/daytona/runner/token.txt" | quote }}
 {{- end }}

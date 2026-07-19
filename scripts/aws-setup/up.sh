@@ -30,7 +30,7 @@ source "$SCRIPT_DIR/../_lib/sku-data.sh"
 # shellcheck source=../_lib/sku-aws.sh
 source "$SCRIPT_DIR/../_lib/sku-aws.sh"
 
-omc::need_cmd aws eksctl kubectl helm envsubst yq jq ssh-keygen curl
+omc::need_cmd aws eksctl kubectl helm envsubst yq jq ssh-keygen openssl curl
 
 STATE_DIR="$(omc::state_dir "$SCRIPT_DIR")"
 PROMPTS_FILE="$STATE_DIR/prompts.env"
@@ -38,6 +38,27 @@ VALUES_OUT="$STATE_DIR/values-region.yaml"
 CLUSTER_CONFIG="$STATE_DIR/cluster.yaml"
 TRUST_POLICY="$STATE_DIR/trust-policy.json"
 S3_POLICY="$STATE_DIR/s3-policy.json"
+RUNNER_MANAGER_AUTH_FILE="$STATE_DIR/runner-manager-auth.env"
+
+# Stable, per-deployment bootstrap credentials. The manager uses API_KEY for
+# its own protected endpoints; SYSTEM_API_TOKEN authenticates its one-time
+# /system/config call to each chart-managed runner. Both remain in mode-0600
+# state and Kubernetes Secrets, never command-line arguments or ConfigMaps.
+if [[ -f "$RUNNER_MANAGER_AUTH_FILE" ]]; then
+  # shellcheck source=/dev/null
+  . "$RUNNER_MANAGER_AUTH_FILE"
+else
+  umask 077
+  RUNNER_MANAGER_API_KEY="$(openssl rand -hex 32)"
+  RUNNER_SYSTEM_API_TOKEN="$(openssl rand -hex 32)"
+  {
+    printf 'export RUNNER_MANAGER_API_KEY=%q\n' "$RUNNER_MANAGER_API_KEY"
+    printf 'export RUNNER_SYSTEM_API_TOKEN=%q\n' "$RUNNER_SYSTEM_API_TOKEN"
+  } > "$RUNNER_MANAGER_AUTH_FILE"
+  chmod 600 "$RUNNER_MANAGER_AUTH_FILE"
+fi
+: "${RUNNER_MANAGER_API_KEY:?runner-manager auth state is missing RUNNER_MANAGER_API_KEY}"
+: "${RUNNER_SYSTEM_API_TOKEN:?runner-manager auth state is missing RUNNER_SYSTEM_API_TOKEN}"
 
 # Re-use prompts from prior partial run, if any.
 if [[ -f "$PROMPTS_FILE" ]]; then
@@ -85,6 +106,8 @@ DAYTONA_PROXY_IMAGE_TAG=""
 DAYTONA_SNAPSHOT_MANAGER_IMAGE_TAG=""
 DAYTONA_SSH_GATEWAY_IMAGE_TAG=""
 DAYTONA_RUNNER_MANAGER_IMAGE_TAG=""
+RUNNER_MANAGER_IMAGE_REGISTRY="docker.io"
+RUNNER_MANAGER_IMAGE_REPOSITORY="daytonaio/daytona-runner-manager"
 RUNNER_IMAGE_REGISTRY="docker.io"
 RUNNER_IMAGE_REPOSITORY="daytonaio/daytona-runner"
 RUNNER_IMAGE_TAG=""
@@ -97,16 +120,24 @@ case "$DAYTONA_IMAGE_PROFILE" in
       "${RUNNER_IMAGE_REF:-}"
     [[ "$RUNNER_IMAGE_REF" == */*:* ]] \
       || omc::die "RUNNER_IMAGE_REF must be registry/repository:tag (got: $RUNNER_IMAGE_REF)"
+    omc::prompt RUNNER_MANAGER_IMAGE_REF \
+      "Patched v0.199-compatible runner-manager image (registry/repository:tag)" \
+      "${RUNNER_MANAGER_IMAGE_REF:-}"
+    [[ "$RUNNER_MANAGER_IMAGE_REF" == */*:* ]] \
+      || omc::die "RUNNER_MANAGER_IMAGE_REF must be registry/repository:tag (got: $RUNNER_MANAGER_IMAGE_REF)"
     RUNNER_IMAGE_REGISTRY="${RUNNER_IMAGE_REF%%/*}"
     runner_image_path="${RUNNER_IMAGE_REF#*/}"
     RUNNER_IMAGE_REPOSITORY="${runner_image_path%:*}"
     RUNNER_IMAGE_TAG="${runner_image_path##*:}"
+    RUNNER_MANAGER_IMAGE_REGISTRY="${RUNNER_MANAGER_IMAGE_REF%%/*}"
+    runner_manager_image_path="${RUNNER_MANAGER_IMAGE_REF#*/}"
+    RUNNER_MANAGER_IMAGE_REPOSITORY="${runner_manager_image_path%:*}"
+    DAYTONA_RUNNER_MANAGER_IMAGE_TAG="${runner_manager_image_path##*:}"
     DAYTONA_IMAGE_BUNDLE_NAME="control-v0.199-runner-canary"
     DAYTONA_ALLOW_VERSION_SKEW=true
     DAYTONA_PROXY_IMAGE_TAG="v0.189.0-amd64"
     DAYTONA_SNAPSHOT_MANAGER_IMAGE_TAG="v0.189.0-amd64"
     DAYTONA_SSH_GATEWAY_IMAGE_TAG="v0.189.0-amd64"
-    DAYTONA_RUNNER_MANAGER_IMAGE_TAG="v0.184.0-k8s-oss.3-amd64"
     ;;
   *)
     omc::die "DAYTONA_IMAGE_PROFILE must be 'parity' or 'v0.199-canary' (got: $DAYTONA_IMAGE_PROFILE)"
@@ -126,6 +157,7 @@ esac
   printf 'export AWS_NODE_VOLUME_SIZE_GB=%q\n' "$AWS_NODE_VOLUME_SIZE_GB"
   printf 'export DAYTONA_IMAGE_PROFILE=%q\n' "$DAYTONA_IMAGE_PROFILE"
   printf 'export RUNNER_IMAGE_REF=%q\n' "${RUNNER_IMAGE_REF:-}"
+  printf 'export RUNNER_MANAGER_IMAGE_REF=%q\n' "${RUNNER_MANAGER_IMAGE_REF:-}"
 } > "$PROMPTS_FILE"
 chmod 600 "$PROMPTS_FILE"
 omc::log INFO "Prompts saved: $PROMPTS_FILE"
@@ -397,6 +429,8 @@ export CLUSTER_NAME BASE_DOMAIN REGION_NAME DAYTONA_API_URL DAYTONA_API_KEY \
        DAYTONA_IMAGE_BUNDLE_NAME DAYTONA_ALLOW_VERSION_SKEW \
        DAYTONA_PROXY_IMAGE_TAG DAYTONA_SNAPSHOT_MANAGER_IMAGE_TAG \
        DAYTONA_SSH_GATEWAY_IMAGE_TAG DAYTONA_RUNNER_MANAGER_IMAGE_TAG \
+       RUNNER_MANAGER_IMAGE_REGISTRY RUNNER_MANAGER_IMAGE_REPOSITORY \
+       RUNNER_MANAGER_API_KEY RUNNER_SYSTEM_API_TOKEN \
        RUNNER_IMAGE_REGISTRY RUNNER_IMAGE_REPOSITORY RUNNER_IMAGE_TAG
 omc::render_template "$SCRIPT_DIR/values-region.yaml.tmpl" "$VALUES_OUT"
 omc::helm_install_wait daytona-region "$SCRIPT_DIR/../../charts/daytona-region" daytona "$VALUES_OUT"

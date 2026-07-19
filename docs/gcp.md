@@ -73,8 +73,9 @@ kubectl -n daytona get pods
 # PSA label applied?
 kubectl get namespace daytona -o yaml | grep pod-security
 
-# HMAC keys reaching the runners? (the DaemonSet is sidecar-only host prep;
-# the runner-manager's spawned pods consume this Secret)
+# HMAC keys staged for the runner workload? The current GCP template retains
+# the legacy sidecar-only setting; enable the DaemonSet main container before
+# using the v0.199-compatible runner-manager architecture described for AWS.
 kubectl -n daytona get secret daytona-region-runner-secrets \
   -o jsonpath='{.data.AWS_ENDPOINT_URL}' | base64 -d; echo
 

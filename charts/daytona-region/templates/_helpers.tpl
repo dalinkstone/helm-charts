@@ -276,3 +276,8 @@ Used as API_TOKEN for runner-manager. Defaults to registration hook secret or re
 {{- define "daytona.runnermanagerDaytonaApiSecretKey" -}}
 {{- .Values.services.runnermanager.apiTokenSecret.key | default .Values.registration.secretKeys.apiKey | default "daytona-api-key" -}}
 {{- end -}}
+
+{{/* Secret shared by runner-manager and runner /system/config authentication. */}}
+{{- define "daytona.runnermanagerAuthSecretName" -}}
+{{- .Values.services.runnermanager.auth.existingSecret | default (printf "%s-runnermanager-auth" (include "daytona.fullname" .)) -}}
+{{- end -}}

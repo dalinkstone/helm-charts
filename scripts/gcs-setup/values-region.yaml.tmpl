@@ -104,11 +104,10 @@ services:
       deleteEnabled: true
 
   runner:
-    # The runner-manager owns the real (cloud-registered) runner pods; they
-    # envFrom runner-config/runner-secrets and bind hostPorts 3000/2220. A
-    # static mainContainer runner never registers with Daytona Cloud and
-    # would fight the manager's pods for those hostPorts — keep the
-    # DaemonSet sidecar-only (host prep: docker + daemon binaries).
+    # This GCS workflow retains the legacy sidecar-only setting and has not yet
+    # been migrated to the v0.199-compatible runner-manager architecture. The
+    # manager creates capacity placeholders, not runner processes; a future GCP
+    # migration must enable this main container and supply shared bootstrap auth.
     mainContainer:
       enabled: false
     ports:

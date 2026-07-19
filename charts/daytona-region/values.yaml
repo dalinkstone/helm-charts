@@ -402,6 +402,15 @@ services:
     apiKeySecret:
       name: ""
       key: "API_KEY"
+    # Authentication shared by the manager and the runner's /system/config
+    # endpoint. Production deployments should override both development
+    # defaults (or point existingSecret at a Secret containing both keys).
+    auth:
+      existingSecret: ""
+      apiKeyKey: "API_KEY"
+      systemApiTokenKey: "SYSTEM_API_TOKEN"
+      apiKey: "secret_api_key"
+      systemApiToken: "system_secret_token"
     env:
       API_PORT: "3010"
       # Floor of ready runners the manager keeps. 2 so the region never runs on a
@@ -558,6 +567,7 @@ services:
       API_PORT: "3000"
       ENVIRONMENT: "production"
       CONTAINER_RUNTIME: ""
+      CONFIG_FILE_PATH: "/var/lib/daytona/runner/token.txt"
       LOG_FILE_PATH: "/home/daytona/runner/runner.log"
       LOG_LEVEL: "info"
       SSH_GATEWAY_ENABLE: "true"

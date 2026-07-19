@@ -25,6 +25,7 @@ fi
 : "${AWS_REGION:?Set AWS_REGION}"
 : "${S3_BUCKET:?Set S3_BUCKET}"
 : "${RUNNER_IMAGE_REF:?Set RUNNER_IMAGE_REF to the verified v0.199 runner image}"
+: "${RUNNER_MANAGER_IMAGE_REF:?Set RUNNER_MANAGER_IMAGE_REF to the patched v0.199-compatible runner-manager image}"
 : "${DAYTONA_API_KEY:?DAYTONA_API_KEY must be forwarded by devflow}"
 : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN must be forwarded by devflow}"
 
@@ -77,6 +78,24 @@ else
   echo "Verified existing runner image: $RUNNER_IMAGE_REF ($resolved_runner_digest)"
 fi
 
+manager_registry="${RUNNER_MANAGER_IMAGE_REF%%/*}"
+manager_repository_and_tag="${RUNNER_MANAGER_IMAGE_REF#*/}"
+manager_repository="${manager_repository_and_tag%:*}"
+manager_image_tag="${manager_repository_and_tag##*:}"
+if [[ "$manager_registry" == *.dkr.ecr.*.amazonaws.com ]]; then
+  resolved_manager_digest="$(aws ecr describe-images --region "$AWS_REGION" --repository-name "$manager_repository" \
+    --image-ids "imageTag=$manager_image_tag" --query 'imageDetails[0].imageDigest' --output text)" \
+    || { echo "ERROR: runner-manager image not found in ECR: $RUNNER_MANAGER_IMAGE_REF" >&2; exit 1; }
+  : "${RUNNER_MANAGER_IMAGE_DIGEST:?Set RUNNER_MANAGER_IMAGE_DIGEST to the verified source build digest}"
+  [[ "$resolved_manager_digest" == "$RUNNER_MANAGER_IMAGE_DIGEST" ]] \
+    || { echo "ERROR: runner-manager image digest mismatch: expected $RUNNER_MANAGER_IMAGE_DIGEST, found $resolved_manager_digest" >&2; exit 1; }
+else
+  docker manifest inspect "$RUNNER_MANAGER_IMAGE_REF" >/dev/null \
+    || { echo "ERROR: runner-manager image manifest not found: $RUNNER_MANAGER_IMAGE_REF" >&2; exit 1; }
+  resolved_manager_digest="${RUNNER_MANAGER_IMAGE_DIGEST:-registry-manifest-verified}"
+fi
+echo "Verified existing runner-manager image: $RUNNER_MANAGER_IMAGE_REF ($resolved_manager_digest)"
+
 if [[ "${BUILD_RUNNER_IMAGE:-false}" == "true" ]]; then
   registry="${RUNNER_IMAGE_REF%%/*}"
   repository_and_tag="${RUNNER_IMAGE_REF#*/}"
@@ -106,6 +125,7 @@ trap 'rm -f "$prompts_tmp"' EXIT INT TERM
   printf 'export AWS_NODE_VOLUME_SIZE_GB=%q\n' "$AWS_NODE_VOLUME_SIZE_GB"
   printf 'export DAYTONA_IMAGE_PROFILE=%q\n' "$DAYTONA_IMAGE_PROFILE"
   printf 'export RUNNER_IMAGE_REF=%q\n' "$RUNNER_IMAGE_REF"
+  printf 'export RUNNER_MANAGER_IMAGE_REF=%q\n' "$RUNNER_MANAGER_IMAGE_REF"
   [[ -n "${AWS_NODE_VM_SIZE:-}" ]] && printf 'export AWS_NODE_VM_SIZE=%q\n' "$AWS_NODE_VM_SIZE"
 } > "$prompts_tmp"
 chmod 600 "$prompts_tmp"
@@ -155,6 +175,8 @@ receipt="$STATE_DIR/deployment-receipt-$(date -u +%Y%m%dT%H%M%SZ).txt"
   echo "daytona_region=$REGION_NAME"
   echo "runner_image=$RUNNER_IMAGE_REF"
   echo "runner_image_digest=$resolved_runner_digest"
+  echo "runner_manager_image=$RUNNER_MANAGER_IMAGE_REF"
+  echo "runner_manager_image_digest=$resolved_manager_digest"
   echo "infra_receipts=$STATE_DIR/infra-test-*.log"
   echo "e2e_receipt=$e2e_report"
   echo "network_receipts=$STATE_DIR/network-smoke-*.log"

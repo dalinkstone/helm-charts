@@ -235,8 +235,9 @@ kubectl logs -n daytona ds/daytona-runner -c sandbox-cpu-reconciler --tail=20
 `volume.share` requires extra runner image contents and a specific runner
 topology. On `charts/daytona-region`, the volume knobs require
 `services.runner.mainContainer.enabled: true` because mounts attach to the
-runner main container. That topology conflicts with runner-manager-spawned
-runner pods over host ports, so use one runner topology per cluster.
+runner main container. This is also the normal K8s runner-manager topology:
+the manager creates capacity placeholders and registers the DaemonSet runner;
+it does not spawn a competing runner Deployment.
 
 ```yaml
 services:

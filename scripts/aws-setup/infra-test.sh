@@ -74,7 +74,7 @@ echo "PASS rollouts: ${#components[@]} Deployments and runner DaemonSet"
 
 runner_pod_count="$(kubectl -n "$NAMESPACE" get pods \
   -l 'app.kubernetes.io/component=runner,daytona.io/runner=true' -o json \
-  | jq '[.items[] | select(.status.phase == "Running") | select(any(.status.containerStatuses[]?; .ready == true))] | length')"
+  | jq '[.items[] | select(.status.phase == "Running") | select(any(.status.containerStatuses[]?; .name == "runner" and .ready == true))] | length')"
 (( runner_pod_count >= 2 )) || omc::die "expected at least two running runner pods; found $runner_pod_count"
 echo "PASS runner pods: $runner_pod_count running"
 
@@ -112,16 +112,32 @@ runner_tag="$(jq -r '.services.runner.image.tag // empty' <<<"$values")"
 [[ -n "$runner_repository" && -n "$runner_tag" ]] || omc::die "live values do not pin the runner repository and tag"
 expected_runner_image="${runner_registry}/${runner_repository}:${runner_tag}"
 kubectl -n "$NAMESPACE" get ds "$runner_ds" -o json \
-  | jq -e --arg image "$expected_runner_image" 'any(.spec.template.spec.containers[]; .image == $image)' >/dev/null \
-  || omc::die "runner DaemonSet does not contain expected image $expected_runner_image"
+  | jq -e --arg image "$expected_runner_image" 'any(.spec.template.spec.containers[]; .name == "runner" and .image == $image)' >/dev/null \
+  || omc::die "runner DaemonSet does not run expected main container image $expected_runner_image"
 if ((${#components[@]} == 4)); then
+  manager_registry="$(jq -r '.services.runnermanager.image.registry // "docker.io"' <<<"$values")"
+  manager_repository="$(jq -r '.services.runnermanager.image.repository // empty' <<<"$values")"
+  manager_tag="$(jq -r '.services.runnermanager.image.tag // empty' <<<"$values")"
+  [[ -n "$manager_repository" && -n "$manager_tag" ]] || omc::die "live values do not pin runner-manager repository and tag"
+  expected_manager_image="${manager_registry}/${manager_repository}:${manager_tag}"
   manager_image="$(kubectl -n "$NAMESPACE" get deploy \
     -l 'app.kubernetes.io/component=runnermanager' -o json \
-    | jq -r '.items[0].spec.template.spec.containers[] | select(.name == "runnermanager") | .env[] | select(.name == "RUNNER_POD_IMAGE") | .value')"
-  [[ "$manager_image" == "$expected_runner_image" ]] \
-    || omc::die "runner-manager will launch '$manager_image', expected '$expected_runner_image'"
+    | jq -r '.items[0].spec.template.spec.containers[] | select(.name == "runnermanager") | .image')"
+  [[ "$manager_image" == "$expected_manager_image" ]] \
+    || omc::die "runner-manager runs '$manager_image', expected '$expected_manager_image'"
+
+  # The v0.199 compatibility path is entirely chart-managed: runner processes
+  # live in the DaemonSet, never ad-hoc Deployments, and no route-rewrite proxy
+  # is allowed to mask a stale manager binary.
+  runner_deployment_count="$(kubectl -n "$NAMESPACE" get deploy -o json \
+    | jq --arg image "$expected_runner_image" '[.items[] | select(any(.spec.template.spec.containers[]?; .image == $image))] | length')"
+  (( runner_deployment_count == 0 )) \
+    || omc::die "found $runner_deployment_count standalone runner Deployment(s); expected DaemonSet-only runners"
+  if kubectl -n "$NAMESPACE" get deploy daytona-api-compat >/dev/null 2>&1; then
+    omc::die "legacy daytona-api-compat Deployment is present; patched runner-manager must call v0.199 directly"
+  fi
 fi
-echo "PASS image bundle: $expected_bundle; runner=$expected_runner_image"
+echo "PASS image bundle: $expected_bundle; runner=$expected_runner_image manager=${expected_manager_image:-disabled}"
 
 region_config="$(kubectl -n "$NAMESPACE" get secret \
   -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=region-config" \

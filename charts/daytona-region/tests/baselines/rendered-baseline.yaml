@@ -59,6 +59,25 @@ metadata:
     app.kubernetes.io/component: ssh-gateway
 
 ---
+# Source: daytona-region/templates/runner-manager-auth-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: release-name-daytona-region-runnermanager-auth
+  namespace: default
+  labels:
+    helm.sh/chart: daytona-region-0.1.1
+    app.kubernetes.io/name: daytona-region
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "v0.184.0-k8s-oss.3-amd64"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: runnermanager
+type: Opaque
+stringData:
+  API_KEY: "secret_api_key"
+  SYSTEM_API_TOKEN: "system_secret_token"
+
+---
 # Source: daytona-region/templates/runner-secret.yaml
 apiVersion: v1
 kind: Secret
@@ -136,7 +155,9 @@ data:
   # into runner pods via envFrom by the runner-manager.
   # Static
   DAEMON_BINARIES_DIR: "/var/lib/daytona/binaries"
-  CONFIG_FILE_PATH: "/host-token/token.txt"
+  # Persist the per-runner API key on the host-backed /var/lib/daytona mount so
+  # a runner container restart does not revert to the generic bootstrap token.
+  CONFIG_FILE_PATH: "/var/lib/daytona/runner/token.txt"
 
 ---
 # Source: daytona-region/templates/runner-docker-installer-configmap.yaml
@@ -1115,6 +1136,16 @@ spec:
               value: "info"
             - name: POD_WAIT_TIMEOUT
               value: "600"
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: release-name-daytona-region-runnermanager-auth
+                  key: API_KEY
+            - name: SYSTEM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: release-name-daytona-region-runnermanager-auth
+                  key: SYSTEM_API_TOKEN
             - name: SERVER_URL
               value: "https://api.daytona.example.com/api"
             - name: REGION_ID

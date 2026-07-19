@@ -267,17 +267,22 @@ ssh-gateway, and runner-manager. Do not override a single component in
 isolation. Plain `v0.184.0-amd64` and `v0.189.0-amd64` are incomplete bundles
 because no runner-manager image is published under those exact tags.
 
-For the v0.199 control-plane canary, build a private runner image with
-`scripts/aws-setup/build-runner-image.sh`, then select the AWS setup profile
-`v0.199-canary`. The profile deliberately opts into a named mixed bundle and
-uses the verified private runner image. An arbitrary one-component override is
-still rejected. After deployment, run `scripts/aws-setup/network-smoke.sh`
-against a newly created sandbox to exercise toolbox port 2280, DNS, and
-direct-IP egress repeatedly.
+For the v0.199 control-plane canary, use both verified private artifacts: the
+v0.199 runner and the patched runner-manager. The stock manager calls the
+removed `GET /runners/by-region/{id}` route and the internal
+`POST /admin/runners` route; an organization API key can use neither on
+v0.199. The patched manager instead uses `GET /runners?regionId=...` and
+`POST /runners`. Configure their immutable image references and digests in
+`canary.env`, then select `v0.199-canary`.
 
 ## Runner DaemonSet pod stuck `Pending` — `didn't have free ports`
 
-`services.runner.mainContainer.enabled: true` makes the DaemonSet bind hostPorts 3000/2220 on every sandbox node — the same ports the runner-manager's spawned pods need (hostNetwork). The manager's pods are also the only runners registered with Daytona Cloud, so the static ones add no capacity. Set `mainContainer.enabled: false` (sidecar-only host prep) whenever `runnermanager` is enabled.
+The chart-managed runner-manager does not spawn runner Deployments. It creates
+placeholder pods; the runner DaemonSet main container supplies one runner per
+sandbox node. Keep `services.runner.mainContainer.enabled: true` and delete any
+old/manual runner Deployments that still bind hostPorts 3000/2220 before
+cutting over. `infra-test.sh` rejects both standalone runner Deployments and the
+legacy `daytona-api-compat` rewrite proxy.
 
 ## Where to escalate
 

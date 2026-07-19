@@ -104,9 +104,10 @@ actions involved.
 | 13 | Validate with the SDK | ✅ `e2e.sh` runs `daytona.create(target=<region>)` |
 
 The chart's `region-registration` pre-install hook registers the region with
-Daytona Cloud; the `runner-manager` Deployment then registers individual
-runners and scales runner pods. There is no VM provisioning, no SSM/SSH, and
-no separate runner installer to drive.
+Daytona Cloud. The `runner-manager` then creates capacity placeholder pods;
+the runner DaemonSet supplies one real runner process per resulting sandbox
+node, and the manager registers that process. There is no manual runner
+Deployment, VM installer, SSM, or SSH bootstrap.
 
 ## Common pitfalls
 
@@ -123,14 +124,12 @@ These surface during a real deployment.
    the inspect/build step. (This template wires both halves from the same
    prompts, so they cannot drift.)
 
-2. **Two different `dtn_xxx` API keys.** The *organization* key is what the
-   chart uses to register the region (the `daytonaApiKey` value, consumed by
-   the `region-registration` hook). The *runner* key is the credential the
-   `runner-manager` uses to register runner pods with Daytona Cloud — it is
-   created by the registration hook and stored in the
-   `<release>-daytona-region-runner-manager-api-key` Secret. They both look
-   like `dtn_...`, so it's easy to confuse the org key for the runner key; you
-   only ever paste the **organization** key.
+2. **Three credentials have different jobs.** You paste only the Daytona
+   *organization* key; the registration hook and manager use it for public
+   organization-scoped APIs. `up.sh` separately generates a manager API key
+   and a runner system bootstrap token in mode-0600 state. Finally,
+   `POST /runners` returns a unique API key for each runner, which the manager
+   sends to that runner over `/system/config`. None are interchangeable.
 
 3. **The wildcard proxy URL needs DNS-01 TLS.** `proxy.<base-domain>` and
    `*.proxy.<base-domain>` must both carry a trusted cert (sandbox previews
@@ -204,8 +203,9 @@ bash scripts/aws-setup/deploy-and-test.sh
 `deploy-and-test.sh` requires an exact clean `EXPECTED_COMMIT`, checks the AWS
 account/principal/region/session expiration/quota and external APIs, runs Helm
 unit tests plus all four static checks and `helm lint`, verifies or builds the
-v0.199 runner image (an existing ECR tag must match the configured immutable
-digest), writes `.state/prompts.env` mode 0600, deploys, and runs:
+v0.199 runner image, and verifies the patched runner-manager image (both ECR
+tags must match their configured immutable digests). It writes
+`.state/prompts.env` mode 0600, deploys, and runs:
 
 - `infra-test.sh` (nodes, taints, rollouts, TLS, image bundle, Daytona region
   and runner state, and live S3 wiring);
@@ -270,8 +270,11 @@ PUSH=true AWS_REGION=us-west-2 \
 ./build-runner-v0199-source.sh
 ```
 
-Choose `v0.199-canary` when `up.sh` asks for the image profile and provide the
-full ECR image reference. This build fixes the upstream HTTPS endpoint check
+The public v0.184 runner-manager is not API-compatible with v0.199. Build the
+source-level fix from private `daytonaio/daytona-ai` branch
+`codex/runner-manager-v0199-api-fix`, publish it to a dedicated ECR repository,
+and configure both `RUNNER_IMAGE_REF` and `RUNNER_MANAGER_IMAGE_REF` (plus their
+digests) before choosing `v0.199-canary`. The runner build fixes the upstream HTTPS endpoint check
 and lets the runner exchange `OBJECT_STORAGE_API_TOKEN` for the short-lived
 credentials used by normal SDK build-context uploads. The AWS values template
 places the already-required Daytona org key in the runner Secret for this

@@ -108,7 +108,18 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.services.runnermanager.apiKeySecret.name }}
                   key: {{ required "services.runnermanager.apiKeySecret.key is required when apiKeySecret.name is set" .Values.services.runnermanager.apiKeySecret.key }}
+            {{- else }}
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "daytona.runnermanagerAuthSecretName" . }}
+                  key: {{ .Values.services.runnermanager.auth.apiKeyKey }}
             {{- end }}
+            - name: SYSTEM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "daytona.runnermanagerAuthSecretName" . }}
+                  key: {{ .Values.services.runnermanager.auth.systemApiTokenKey }}
             - name: SERVER_URL
               value: {{ .Values.services.runnermanager.env.SERVER_URL | default (required "daytonaApiUrl is required" .Values.daytonaApiUrl) | quote }}
             - name: REGION_ID

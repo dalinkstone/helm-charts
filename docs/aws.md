@@ -75,11 +75,45 @@ PUSH=true AWS_REGION=<region> \
 bash scripts/aws-setup/build-runner-image.sh
 ```
 
-Then choose `v0.199-canary` in `up.sh` and enter that full image reference. The
-profile is intentionally mixed: private v0.199 runner plus its embedded
-sandbox daemon/toolbox; public v0.189 proxy, snapshot-manager, and SSH gateway;
-and public v0.184 runner-manager. It is a controlled compatibility test, not a
-vendor-supported production declaration.
+The public `daytonaio/daytona-runner-manager:v0.184.0-k8s-oss.3-amd64`
+cannot manage v0.199 with an organization API key: it lists through
+`/runners/by-region/{id}` and creates through `/admin/runners`. Build the
+source-level patch from private `daytonaio/daytona-ai` branch
+`codex/runner-manager-v0199-api-fix` and publish it to a dedicated private
+repository, then configure both artifacts:
+
+The current canary image was built from patch commit
+`9cb17eecc8af34b60347db181d0edbb1c63a1bd3`, directly on top of the official
+image's provenance commit `5b6d876856e3f89d767c353882272d5ba7d7b4f1`,
+using the original `apps/runner-manager/Dockerfile` rather than modifying an
+image layer or running `install.sh`:
+
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  --file apps/runner-manager/Dockerfile \
+  --target runner-manager \
+  --tag 850539758367.dkr.ecr.us-west-2.amazonaws.com/daytona-runner-manager:v0.184.0-k8s-oss.4-v0199-api-amd64 \
+  --load \
+  .
+```
+
+The immutable canary artifact is
+`850539758367.dkr.ecr.us-west-2.amazonaws.com/daytona-runner-manager:v0.184.0-k8s-oss.4-v0199-api-amd64`,
+digest
+`sha256:a1802967b36fb36277711b186dda737a82f4b456fbaaf7c86de20006feb8e483`.
+This is a private compatibility build, not an official Daytona Docker Hub
+release.
+
+```bash
+export RUNNER_IMAGE_REF=<account>.dkr.ecr.<region>.amazonaws.com/daytona-runner:<tag>
+export RUNNER_MANAGER_IMAGE_REF=<account>.dkr.ecr.<region>.amazonaws.com/daytona-runner-manager:<tag>
+```
+
+Then choose `v0.199-canary` in `up.sh`. The profile is intentionally mixed:
+private v0.199 runner plus its embedded sandbox daemon/toolbox, the patched
+manager, and public v0.189 proxy/snapshot-manager/SSH gateway. It is a
+controlled compatibility test, not a vendor-supported production declaration.
 
 The script saves your answers to `scripts/aws-setup/.state/prompts.env` so a re-run reuses them.
 It also selects an EKS node instance type that satisfies the script's minimum

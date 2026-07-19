@@ -332,9 +332,17 @@ After the key swap, register the gateway address with Daytona Cloud (`PATCH /reg
 
 ## Runner Topology
 
-With `services.runnermanager.enabled: true` (the default), the **runner-manager owns the runner pods**: it spawns them on demand, registers them with Daytona Cloud, and recycles them. The runner DaemonSet then runs **sidecars only** (`docker-installer`, `daytona-binary-installer`) to prepare each sandbox node.
+With `services.runnermanager.enabled: true`, the manager creates lightweight
+`node-placeholder-*` pods to request and retain capacity. The cluster
+autoscaler supplies nodes for those placeholders; the runner DaemonSet's
+`runner` main container is the one actual runner process on each node. The
+manager discovers that DaemonSet pod, creates its Daytona Cloud runner record,
+and sends the returned per-runner API key to `/system/config`.
 
-Leave `services.runner.mainContainer.enabled: false` in this topology. A static main-container runner is never registered with Daytona Cloud (the manager only registers pods it created) and competes with the manager's pods for hostPorts 3000/2220 — the visible symptom is a DaemonSet pod stuck `Pending` with `didn't have free ports`. `mainContainer: true` exists for environments that run the runner process statically without the manager.
+Accordingly, the K8s-native topology uses
+`services.runner.mainContainer.enabled: true`. The manager does **not** create
+standalone runner Deployments. A deployment that uses manual runner
+Deployments or an API route-rewrite proxy is outside this chart-managed path.
 
 ## URL Derivation
 
