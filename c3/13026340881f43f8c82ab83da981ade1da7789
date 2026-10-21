@@ -1,0 +1,38 @@
+charts/daytona-region/tests/runner-host-aliases_test.yaml
+  s_da571e2a7bbe94::t_9dd796db2c8f32 7-11,13,81-229
+scripts/aws-setup/values-region.yaml.tmpl
+  s_da571e2a7bbe94::t_433a2049187e1a 126
+  s_da571e2a7bbe94::t_4944c13a32aeae 127-128
+charts/daytona-region/tests/runner_snapshot_route_test.rb
+  s_da571e2a7bbe94::t_59aa4a42e00d5f 1-122
+scripts/azure-setup/values-region.yaml.tmpl
+  s_da571e2a7bbe94::t_433a2049187e1a 107-109
+charts/daytona-region/templates/_helpers.tpl
+  s_da571e2a7bbe94::t_433a2049187e1a 213,215-224
+  s_da571e2a7bbe94::t_aa1a6d73ed7846 214
+charts/daytona-region/templates/runner-daemonset.yaml
+  s_da571e2a7bbe94::t_9dd796db2c8f32 1392
+  s_da571e2a7bbe94::t_433a2049187e1a 14-27,194,201-225,229-231,912-914
+docs/troubleshooting.md
+  s_da571e2a7bbe94::t_bfc0dcaaa2dc87 261-330
+scripts/gcs-setup/values-region.yaml.tmpl
+  s_da571e2a7bbe94::t_433a2049187e1a 107-109
+charts/daytona-region/values.yaml
+  s_da571e2a7bbe94::t_433a2049187e1a 560-571,615,623-628
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c313026340881f43f8c82ab83da981ade1da7789",
+  "prompts": {},
+  "sessions": {
+    "s_da571e2a7bbe94": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16085-d4b3-7532-a6af-c03f73c39725",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Dalin Stone <dalinkstone@gmail.com>"
+    }
+  }
+}
