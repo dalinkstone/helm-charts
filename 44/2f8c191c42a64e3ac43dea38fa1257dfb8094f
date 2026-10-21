@@ -1,0 +1,19 @@
+scripts/aws-setup/values-region.yaml.tmpl
+  s_da571e2a7bbe94::t_bfc0dcaaa2dc87 107-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "442f8c191c42a64e3ac43dea38fa1257dfb8094f",
+  "prompts": {},
+  "sessions": {
+    "s_da571e2a7bbe94": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16085-d4b3-7532-a6af-c03f73c39725",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Dalin Stone <dalinkstone@gmail.com>"
+    }
+  }
+}
