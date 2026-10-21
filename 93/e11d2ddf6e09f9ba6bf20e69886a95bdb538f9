@@ -1,0 +1,19 @@
+charts/daytona-region/tests/runner-sandbox-hardening_test.yaml
+  s_da571e2a7bbe94::t_9dd796db2c8f32 59,129,135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "93e11d2ddf6e09f9ba6bf20e69886a95bdb538f9",
+  "prompts": {},
+  "sessions": {
+    "s_da571e2a7bbe94": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16085-d4b3-7532-a6af-c03f73c39725",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Dalin Stone <dalinkstone@gmail.com>"
+    }
+  }
+}
