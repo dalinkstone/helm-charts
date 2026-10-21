@@ -1,0 +1,21 @@
+charts/daytona-region/README.md
+  s_da571e2a7bbe94::t_bfc0dcaaa2dc87 212
+docs/aws.md
+  s_da571e2a7bbe94::t_bfc0dcaaa2dc87 58,114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e436e7bb0310eaff86127a969a9328955f4796fd",
+  "prompts": {},
+  "sessions": {
+    "s_da571e2a7bbe94": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16085-d4b3-7532-a6af-c03f73c39725",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Dalin Stone <dalinkstone@gmail.com>"
+    }
+  }
+}
