@@ -1,0 +1,24 @@
+charts/daytona-region/README.md
+  s_20725b2f644c78::t_c76aea736dd0c9 618-619,629-631
+  s_20725b2f644c78::t_da9782b834e901 611-614,620-628
+charts/daytona-region/tests/runner-start-timeout_test.yaml
+  s_20725b2f644c78::t_da9782b834e901 48,52-54,59-87
+charts/daytona-region/values.yaml
+  s_20725b2f644c78::t_da9782b834e901 541-544
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6e4799331c3f3adb8ab689f889f6f6287ec00754",
+  "prompts": {},
+  "sessions": {
+    "s_20725b2f644c78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16210-82b4-77d2-8abb-55d6f5f94e34",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Dalin Stone <dalinkstone@gmail.com>"
+    }
+  }
+}
