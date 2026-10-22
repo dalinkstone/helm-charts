@@ -1,0 +1,29 @@
+charts/daytona-region/Chart.yaml
+  s_20725b2f644c78::t_acf3cb1b242b14 5
+charts/daytona-region/README.md
+  s_20725b2f644c78::t_0d809606e9f2d4 593-630
+charts/daytona-region/templates/runner-configmap.yaml
+  s_20725b2f644c78::t_72457f4e6b5c1d 23
+charts/daytona-region/tests/baselines/rendered-baseline.yaml
+  s_20725b2f644c78::t_d33b37b3667646 9,24,39,54,69,95,115,134,150,167,185,208,233,256,282,308,334,1197,1272,1391,1455,1502,1521,1545,1568,1595,1644
+charts/daytona-region/tests/runner-start-timeout_test.yaml
+  s_20725b2f644c78::t_603ff7a9da1f25 1-82
+charts/daytona-region/values.yaml
+  s_20725b2f644c78::t_dfe625aff37b2f 541-543
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a9e176550692f84a1fc11abf615cd86e3999a408",
+  "prompts": {},
+  "sessions": {
+    "s_20725b2f644c78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16210-82b4-77d2-8abb-55d6f5f94e34",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Dalin Stone <dalinkstone@gmail.com>"
+    }
+  }
+}
